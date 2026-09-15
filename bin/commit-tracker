@@ -256,10 +256,13 @@ def remote_to_web_url(url: str | None) -> str | None:
     url = url.strip()
 
     if _SCHEME_RE.match(url):
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname or ""  # lower-cased, userinfo and port removed
+        except ValueError:
+            return None  # e.g. an unbalanced IPv6 bracket: no link, but the commits still count
         if parts.scheme.lower() not in _SUPPORTED_SCHEMES:
             return None  # file://, or anything else unsupported
-        host = parts.hostname or ""  # lower-cased, userinfo and port removed
         path = parts.path  # query and fragment never belong in the link
     else:
         m = _SCP_LIKE_RE.match(url)
@@ -571,19 +574,10 @@ def compute_repo_names(repo_paths: list[str]) -> dict[str, str]:
     return names
 
 
-def resolve_watch_path(repo_path: str) -> str | None:
-    """Resolve the path the bar widget should watch for near-instant refresh.
-
-    Prefers <gitdir>/logs (the reflog directory, touched on every commit or
-    ref update). A brand new repo has no reflog at all until its first
-    commit, so until then this falls back to the gitdir itself instead: the
-    widget also watches for a `create` event there, and reacts once a path
-    ending in "/logs" or "/HEAD" appears -- which the first commit produces.
-
-    Handles both a .git directory and a .git file (`gitdir: <path>`, used by
-    linked worktrees and submodules -- the path may be relative to
-    repo_path, as it is for submodules; worktrees use an absolute path).
-    """
+def git_dir(repo_path: str) -> str | None:
+    """The repository's git directory: .git itself, or where a .git file
+    (`gitdir: <path>`, used by linked worktrees and submodules) points -- the
+    path may be relative to repo_path, as it is for submodules."""
     git_entry = os.path.join(repo_path, ".git")
     try:
         if os.path.isdir(git_entry):
@@ -600,6 +594,39 @@ def resolve_watch_path(repo_path: str) -> str | None:
         else:
             return None
     except OSError:
+        return None
+    return gitdir
+
+
+def head_is_detached(repo_path: str) -> bool:
+    """True when HEAD names a commit rather than a branch. Read straight from
+    the HEAD file: no extra git process per repository."""
+    gitdir = git_dir(repo_path)
+    if gitdir is None:
+        return False
+    try:
+        with open(os.path.join(gitdir, "HEAD"), "r", encoding="utf-8", errors="replace") as f:
+            head = f.read().strip()
+    except OSError:
+        return False
+    return bool(_HASH_RE.match(head))
+
+
+def resolve_watch_path(repo_path: str) -> str | None:
+    """Resolve the path the bar widget should watch for near-instant refresh.
+
+    Prefers <gitdir>/logs (the reflog directory, touched on every commit or
+    ref update). A brand new repo has no reflog at all until its first
+    commit, so until then this falls back to the gitdir itself instead: the
+    widget also watches for a `create` event there, and reacts once a path
+    ending in "/logs" or "/HEAD" appears -- which the first commit produces.
+
+    Handles both a .git directory and a .git file (`gitdir: <path>`, used by
+    linked worktrees and submodules -- the path may be relative to
+    repo_path, as it is for submodules; worktrees use an absolute path).
+    """
+    gitdir = git_dir(repo_path)
+    if gitdir is None:
         return None
     logs_dir = os.path.join(gitdir, "logs")
     if os.path.isdir(logs_dir):
@@ -717,7 +744,10 @@ def process_repo(
                 "unpushed_hashes": set(),
             }
 
-    ref_args = ["--branches", "--remotes", "--tags"]
+    # A detached HEAD (mid-rebase, or a commit made on a checked-out hash) is
+    # on no branch: name it too, so that work counts -- and counts as unpushed.
+    head_args = ["HEAD"] if head_is_detached(repo_path) else []
+    ref_args = head_args + ["--branches", "--remotes", "--tags"]
     # Merges: when included, they count as commits but contribute no lines --
     # `git log --numstat` prints no diff at all for a merge commit unless
     # -m/-c is passed, which we never do, so this falls out for free. Applied
@@ -756,7 +786,7 @@ def process_repo(
     unpushed_hashes: set[str] = set()
     if has_remote:
         unpushed_args = (
-            ["log", "--branches", "--not", "--remotes"] + merge_args + author_args
+            ["log"] + head_args + ["--branches", "--not", "--remotes"] + merge_args + author_args
             + [f"--format={LOG_FORMAT}"]
         )
         urc, uout, uerr = run_git(repo_path, unpushed_args)
@@ -885,6 +915,23 @@ def run(cfg: Config) -> dict:
     # Global dedupe across repos/refs by SHA; the first occurrence in
     # attribution order (least nested clone first) gets the credit.
     credit_order = attribution_order(repo_paths)
+
+    # Push evidence per commit, across every clone: a commit is pushed when any
+    # clone with a remote has it outside its unpushed set, and its link goes to
+    # that clone's forge -- whichever clone ends up credited for the commit.
+    pushed_by_sha: dict[str, bool] = {}
+    web_base_by_sha: dict[str, str] = {}
+    for path in credit_order:
+        result = results_by_path.get(path)
+        if not result or not result["has_remote"]:
+            continue
+        for rec in result["records"]:
+            h = rec["hash"]
+            if h in result["unpushed_hashes"]:
+                continue
+            pushed_by_sha[h] = True
+            if result["web_base"] and h not in web_base_by_sha:
+                web_base_by_sha[h] = result["web_base"]
     all_records = []
     for path in credit_order:
         for rec in results_by_path.get(path, {}).get("records", []):
@@ -913,7 +960,7 @@ def run(cfg: Config) -> dict:
         if not has_remote_by_name.get(name):
             continue
         for h in unpushed_by_name.get(name, ()):
-            if h in seen_unpushed:
+            if h in seen_unpushed or pushed_by_sha.get(h):
                 continue
             seen_unpushed.add(h)
             unpushed_repo_counts[name] += 1
@@ -972,7 +1019,7 @@ def run(cfg: Config) -> dict:
     if cfg.history_days > 0:
         output["history"] = build_history_block(
             cfg, deduped, today_date, thresholds,
-            has_remote_by_name, web_base_by_name, unpushed_by_name,
+            web_base_by_name, pushed_by_sha, web_base_by_sha,
         )
 
     return output
@@ -983,9 +1030,9 @@ def build_history_block(
     deduped: list[dict],
     today_date: date,
     thresholds: tuple[int, int, int, int],
-    has_remote_by_name: dict[str, bool],
     web_base_by_name: dict[str, str | None],
-    unpushed_by_name: dict[str, set],
+    pushed_by_sha: dict[str, bool],
+    web_base_by_sha: dict[str, str],
 ) -> dict:
     history_start_date = today_date - timedelta(days=cfg.history_days - 1)
     history_records = [r for r in deduped if history_start_date <= r["local_date"] <= today_date]
@@ -1022,9 +1069,8 @@ def build_history_block(
     commits_out = []
     for r in commits_sorted[: cfg.commits]:
         name = r["repo_name"]
-        has_remote = has_remote_by_name.get(name, False)
-        pushed = has_remote and r["hash"] not in unpushed_by_name.get(name, ())
-        base = web_base_by_name.get(name)
+        pushed = pushed_by_sha.get(r["hash"], False)
+        base = web_base_by_sha.get(r["hash"])
         url = commit_url(base, r["hash"]) if (pushed and base) else None
         commits_out.append({
             "hash": r["hash"],

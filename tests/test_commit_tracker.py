@@ -1085,6 +1085,51 @@ class CommitTrackerCLITests(unittest.TestCase):
         self.assertEqual({r["name"] for r in find_day(data, "2026-09-01")["repos"]}, {"a/proj", "b/proj"})
 
 
+    # -- 25-27. second-opinion fixes -----------------------------------------
+
+    def test_25_a_malformed_remote_url_costs_the_link_not_the_commits(self):
+        self.set_global_identity("owner@example.com", "Owner")
+        repo = self.make_repo("repo")
+        self.commit(repo, {"a.txt": "a\n"}, "one", adate=iso(2026, 9, 1, 10), aemail="owner@example.com")
+        self.git(repo, "config", "remote.origin.url", "https://[::1/repo.git")
+        data, _ = self.run_tool_json(self.default_args(epoch(2026, 9, 1), days=3,
+                                                       extra=["--history-days", "3", "--commits", "10"]))
+        self.assertEqual(data["totals"]["commits"], 1)
+        self.assertIsNone(data["history"]["commits"][0]["url"])
+        self.assertFalse(any("unexpected error" in w for w in data["warnings"]), data["warnings"])
+
+    def test_26_push_evidence_from_any_clone_marks_the_commit_pushed(self):
+        self.set_global_identity("owner@example.com", "Owner")
+        main = self.make_repo("repo")  # least nested, so credited -- but it has no remote
+        sha = self.commit(main, {"a.txt": "a\n"}, "shared", adate=iso(2026, 9, 1, 10), aemail="owner@example.com")
+        nested = os.path.join(self.roots_dir, "nested", "repo")
+        self.git(self.roots_dir, "clone", "-q", main, nested)
+        self.git(nested, "remote", "set-url", "origin", "https://github.com/me/repo.git")
+        data, _ = self.run_tool_json(self.default_args(epoch(2026, 9, 1), days=3,
+                                                       extra=["--history-days", "3", "--commits", "10"]))
+        row = data["history"]["commits"][0]
+        self.assertEqual(row["repo"], "repo")
+        self.assertTrue(row["pushed"])
+        self.assertEqual(row["url"], f"https://github.com/me/repo/commit/{sha}")
+        self.assertEqual(data["unpushed"]["commits"], 0)
+
+    def test_27_a_commit_on_a_detached_head_counts_and_is_unpushed(self):
+        self.set_global_identity("owner@example.com", "Owner")
+        repo = self.make_repo("repo")
+        base = self.commit(repo, {"a.txt": "a\n"}, "base", adate=iso(2026, 9, 1, 9), aemail="owner@example.com")
+        self.git(repo, "remote", "add", "origin", "https://github.com/me/r.git")
+        self.git(repo, "update-ref", "refs/remotes/origin/main", base)
+        self.git(repo, "checkout", "-q", "--detach")
+        self.commit(repo, {"b.txt": "b\n"}, "detached", adate=iso(2026, 9, 1, 10), aemail="owner@example.com")
+        data, _ = self.run_tool_json(self.default_args(epoch(2026, 9, 1), days=3,
+                                                       extra=["--history-days", "3", "--commits", "10"]))
+        self.assertEqual(data["totals"]["commits"], 2)
+        self.assertEqual(data["unpushed"]["commits"], 1)
+        rows = {c["subject"]: c for c in data["history"]["commits"]}
+        self.assertFalse(rows["detached"]["pushed"])
+        self.assertTrue(rows["base"]["pushed"])
+
+
 class RemoteUrlHardeningTests(unittest.TestCase):
     """Remote URLs come from repository config, which a cloned repository's
     author controls, and the result is opened in a browser."""
@@ -1099,6 +1144,7 @@ class RemoteUrlHardeningTests(unittest.TestCase):
         ("https://github.com/o/r with space", None),
         ("git@github-work:o/r.git", None),
         ("https://[::1]/o/r", None),
+        ("https://[::1/repo.git", None),
         ("javascript:alert(1)", None),
         ("C:/Users/me/repo", None),
     ]

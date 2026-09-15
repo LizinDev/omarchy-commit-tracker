@@ -48,6 +48,20 @@ Item {
   // name in the list, clearing) pushes the value across instead.
   onRepoChanged: repoPicker.value = repo
 
+  // A refresh can drop the chosen repository out of the window; a filter that
+  // matches nothing would leave an empty panel behind a stale label.
+  onReposChanged: {
+    if (repo === "") return
+    for (var i = 0; i < repos.length; i++) if (repos[i].name === repo) return
+    repo = ""
+  }
+
+  // The list carries only the newest commits (--commits); the graph and the
+  // totals still count all of them, so an older day can be active on the
+  // graph yet have no rows here.
+  readonly property bool listCapped: history && history.totals ? Number(history.totals.commits) > commits.length : false
+  readonly property string oldestListed: commits.length > 0 ? String(commits[commits.length - 1].date) : ""
+
   readonly property int allCommits: history && history.totals ? Number(history.totals.commits) || 0 : 0
 
   readonly property var dayCounts: days.map(function(day) { return History.dayCommits(day, root.repo) })
@@ -380,7 +394,9 @@ Item {
             width: parent.width
             text: !root.history
               ? (root.host && root.host.historyError !== "" ? "Could not load the history." : "Counting commits…")
-              : (root.selectedDate !== "" ? "No commits that day." : "No commits in this period.")
+              : (root.listCapped && (root.selectedDate === "" || root.selectedDate < root.oldestListed)
+                  ? "Only the latest " + root.commits.length + " commits are listed; these are older."
+                  : (root.selectedDate !== "" ? "No commits that day." : "No commits in this period."))
             textFormat: Text.PlainText
             color: root.muted
             font.family: Style.font.family
