@@ -1,0 +1,1076 @@
+#!/usr/bin/env python3
+"""commit-tracker: per-local-day git commit/line counts across local repositories.
+
+Prints one JSON object on stdout, meant to be polled by an Omarchy bar widget
+(which also watches the `watch` paths for near-instant refresh) and, with
+--history-days > 0, by a left-click history panel (heatmap, commit list,
+streaks). Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from urllib.parse import urlsplit
+
+PROG = "commit-tracker"
+
+# Well-known lockfiles excluded from *line* counts (matched on basename only).
+LOCKFILE_BASENAMES = {
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "bun.lock", "Cargo.lock", "poetry.lock", "uv.lock", "Pipfile.lock",
+    "composer.lock", "Gemfile.lock", "go.sum", "flake.lock",
+}
+
+# Directory names pruned during repo discovery (in addition to dot-directories).
+PRUNE_DIR_NAMES = {"node_modules", "__pycache__", "venv", "site-packages", "target"}
+
+GIT_TIMEOUT = 10  # seconds; a hung repo becomes a warning, never a hang.
+
+# Each commit record starts with a marker drawn fresh for every run. A fixed
+# separator can be forged: a commit subject containing it would split into
+# extra, invented commits, and nobody can plant a per-run random token in a
+# subject ahead of time.
+RECORD_TOKEN = secrets.token_hex(8)
+RECORD_MARK = "\x1e" + RECORD_TOKEN + "\x1e"
+US = "\x1f"  # ASCII unit separator: separates fields within a header line.
+LOG_FORMAT = "%x1e" + RECORD_TOKEN + "%x1e%H%x1f%at%x1f%ae%x1f%an%x1f%P%x1f%s"
+_HASH_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")  # SHA-1 or SHA-256
+
+# Fixed lower bounds for levels 1..4, by metric. No history-derived mode.
+DEFAULT_LEVELS = {
+    "commits": (1, 2, 4, 8),
+    "lines": (1, 50, 200, 800),
+}
+
+GIT_BASE_ARGS = ["-c", "core.quotepath=off", "-c", "log.showSignature=false", "--no-pager"]
+
+
+# --------------------------------------------------------------------------
+# CLI argument handling
+# --------------------------------------------------------------------------
+
+class ArgError(Exception):
+    """Bad CLI input. Caller turns this into the {"version":1,"error":...} contract."""
+
+
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message):  # never let argparse print usage + sys.exit() on its own
+        raise ArgError(message)
+
+
+@dataclass
+class Config:
+    days: int
+    max_depth: int
+    roots: list[str]
+    author: list[str] | None  # None means "use default identity logic"
+    include_merges: bool
+    metric: str
+    level_mode: str  # "default" or "custom" (levelMode in the output)
+    fixed_levels: tuple[int, int, int, int] | None
+    now: int
+    pretty: bool
+    history_days: int  # 0 = no `history` block
+    commits: int  # max entries in history.commits
+
+
+def build_parser() -> SafeArgumentParser:
+    p = SafeArgumentParser(prog=PROG, add_help=True)
+    p.add_argument("--days", type=int, default=5)
+    p.add_argument("--root", action="append", default=None)
+    p.add_argument("--max-depth", type=int, default=4)
+    p.add_argument("--author", action="append", default=None)
+    p.add_argument("--include-merges", action="store_true", default=False)
+    p.add_argument("--metric", choices=["commits", "lines"], default="commits")
+    p.add_argument("--levels", default="auto")
+    p.add_argument("--now", type=int, default=None)
+    p.add_argument("--pretty", action="store_true", default=False)
+    p.add_argument("--history-days", type=int, default=0)
+    p.add_argument("--commits", type=int, default=0)
+    return p
+
+
+def clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, value))
+
+
+def parse_levels(spec: str) -> tuple[str, tuple[int, int, int, int] | None]:
+    """Returns (mode, fixed_levels). mode is 'default' or 'custom'.
+
+    'auto' and 'default' are accepted as synonyms for the metric's fixed
+    default bounds -- kept as a CLI alias for backwards compatibility, but
+    there is no history-derived ("auto"/percentile) mode.
+    """
+    if spec in ("auto", "default"):
+        return "default", None
+    parts = spec.split(",")
+    if len(parts) != 4:
+        raise ArgError(
+            f"--levels must be 'auto'/'default' or 4 comma-separated ascending positive integers, got {spec!r}"
+        )
+    try:
+        nums = [int(part.strip()) for part in parts]
+    except ValueError:
+        raise ArgError(f"--levels values must be integers, got {spec!r}")
+    if any(n <= 0 for n in nums):
+        raise ArgError(f"--levels values must be positive, got {spec!r}")
+    if not (nums[0] < nums[1] < nums[2] < nums[3]):
+        raise ArgError(f"--levels values must be strictly ascending, got {spec!r}")
+    return "custom", (nums[0], nums[1], nums[2], nums[3])
+
+
+def build_config(args: argparse.Namespace) -> Config:
+    days = clamp(args.days, 1, 31)
+    max_depth = clamp(args.max_depth, 0, 8)
+    level_mode, fixed_levels = parse_levels(args.levels)
+    now = args.now if args.now is not None else int(time.time())
+    roots = args.root if args.root else ["~"]
+    history_days = clamp(args.history_days, 0, 371)
+    commits = clamp(args.commits, 0, 1000)
+    return Config(
+        days=days,
+        max_depth=max_depth,
+        roots=roots,
+        author=args.author,
+        include_merges=args.include_merges,
+        metric=args.metric,
+        level_mode=level_mode,
+        fixed_levels=fixed_levels,
+        now=now,
+        pretty=args.pretty,
+        history_days=history_days,
+        commits=commits,
+    )
+
+
+def parse_config(argv: list[str] | None) -> Config:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return build_config(args)
+
+
+# --------------------------------------------------------------------------
+# Small, isolated pure functions (dedupe key, author matching, levels, remote
+# URL normalization, streaks). These are the pieces most likely to be
+# amended after review -- keep them small and self-contained so a patch
+# stays local.
+# --------------------------------------------------------------------------
+
+def dedupe_key(commit_hash: str) -> str:
+    """Identity of a commit for cross-repo/ref dedupe: the SHA alone.
+
+    A prior revision keyed on (author_ts, email, subject); an independent
+    review found that key collides for two distinct commits made in the
+    same second with the same author and subject. SHA avoids that. A
+    duplicate clone still dedupes (identical SHA); a rebased or
+    cherry-picked copy gets a new SHA and is intentionally counted again --
+    accepted tradeoff (typically transient, e.g. before a force-push).
+    """
+    return commit_hash
+
+
+def author_matches(patterns: list[str], author_email: str, author_name: str) -> bool:
+    """Exact (case/whitespace-insensitive) post-filter.
+
+    git's own `-F -i --author=<p>` is only a fast pre-filter here: it's a
+    substring match, so `--author=Ann -F -i` also matches "Joann Example"
+    (contains "ann"). This is the actual, authoritative check: a pattern
+    containing '@' must equal the author's email; any other pattern must
+    equal the author's name.
+    """
+    email_norm = author_email.strip().casefold()
+    name_norm = author_name.strip().casefold()
+    for p in patterns:
+        p_norm = p.strip().casefold()
+        if "@" in p_norm:
+            if p_norm == email_norm:
+                return True
+        elif p_norm == name_norm:
+            return True
+    return False
+
+
+def level_for_value(value: int, thresholds: tuple[int, int, int, int]) -> int:
+    """level = number of ascending lower-bound thresholds that are <= value."""
+    if value <= 0:
+        return 0
+    return sum(1 for t in thresholds if t <= value)
+
+
+def compute_thresholds(
+    level_mode: str,
+    metric: str,
+    fixed_levels: tuple[int, int, int, int] | None,
+) -> tuple[str, tuple[int, int, int, int]]:
+    """Decide the 4 threshold numbers. Returns (levelMode_used, thresholds).
+
+    Always fixed lower bounds: either the metric's own default, or a
+    user-supplied 'custom' set of 4 ascending positive integers. An earlier
+    revision derived "auto" bounds from baseline-window percentiles; with
+    only a handful of boxes those quartiles were unstable as the baseline
+    rolled day to day and often left levels unused, so that mode (and the
+    whole baseline pass/--baseline-days) was dropped after review.
+    """
+    if level_mode == "custom":
+        assert fixed_levels is not None
+        return "custom", fixed_levels
+    return "default", DEFAULT_LEVELS[metric]
+
+
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*)://(.*)$")
+# [user@]host:path, the scp-like form: everything before the first colon,
+# which may carry any number of user@ prefixes.
+_SCP_LIKE_RE = re.compile(r"^([^/\s]+?):(?!//)(\S+)$")
+# A real, dotted DNS name. An SSH host alias ("github-work") has no dot and
+# no web page we could know of.
+_HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+_PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+_SUPPORTED_SCHEMES = ("http", "https", "ssh", "git")
+
+
+def remote_to_web_url(url: str | None) -> str | None:
+    """Normalize a git remote URL to an https://host/owner/repo base, or None.
+
+    Remote URLs come from repository config, which a cloned repository's
+    author controls, and the result is opened in a browser -- so this is
+    strict: the only thing that survives is https://, a real dotted host name,
+    and plain path segments. Credentials (any number of user@ prefixes),
+    ports, query strings and fragments are always dropped; dot segments,
+    encoded or odd characters, IP literals, SSH host aliases, local paths and
+    file:// all give None. Handles scp-like (git@host:owner/repo), ssh://,
+    https:// and git:// forms, strips a trailing .git, keeps nested paths
+    (GitLab subgroups). Never returns or logs the raw input.
+    """
+    if not url:
+        return None
+    url = url.strip()
+
+    if _SCHEME_RE.match(url):
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in _SUPPORTED_SCHEMES:
+            return None  # file://, or anything else unsupported
+        host = parts.hostname or ""  # lower-cased, userinfo and port removed
+        path = parts.path  # query and fragment never belong in the link
+    else:
+        m = _SCP_LIKE_RE.match(url)
+        if not m:
+            return None  # local path or unparseable
+        host = m.group(1).rsplit("@", 1)[-1].lower()
+        path = m.group(2)
+
+    if not _HOST_RE.match(host):
+        return None
+    segments = [seg for seg in path.split("/") if seg]
+    if segments and segments[-1].endswith(".git"):
+        segments[-1] = segments[-1][: -len(".git")]
+    if not segments or any(seg in (".", "..") or not _PATH_SEGMENT_RE.match(seg) for seg in segments):
+        return None
+    return f"https://{host}/{'/'.join(segments)}"
+
+
+def commit_url(web_base: str, commit_hash: str) -> str:
+    """Commit URL for a given normalized https://host/... base."""
+    rest = web_base[len("https://"):] if web_base.startswith("https://") else web_base
+    host = rest.split("/", 1)[0]
+    if "gitlab" in host:
+        return f"{web_base}/-/commit/{commit_hash}"
+    if "bitbucket.org" in host:
+        return f"{web_base}/commits/{commit_hash}"
+    return f"{web_base}/commit/{commit_hash}"  # GitHub, Gitea, Forgejo, Codeberg, ...
+
+
+def compute_streak(active_days: list[bool]) -> dict:
+    """GitHub-style streaks over a run of days, oldest -> newest, last = today.
+
+    current: consecutive active-day run ending today; if today is not yet
+    active, the run ending yesterday still counts ("in progress"). A gap of
+    2+ days (today and yesterday both inactive) breaks it to 0.
+    longest: the longest active run anywhere in the given days.
+    """
+    n = len(active_days)
+    longest = 0
+    run = 0
+    for active in active_days:
+        run = run + 1 if active else 0
+        longest = max(longest, run)
+
+    if n == 0:
+        return {"current": 0, "longest": 0}
+
+    if active_days[-1]:
+        end = n - 1
+    elif n >= 2 and active_days[-2]:
+        end = n - 2
+    else:
+        return {"current": 0, "longest": longest}
+
+    current = 0
+    i = end
+    while i >= 0 and active_days[i]:
+        current += 1
+        i -= 1
+    return {"current": current, "longest": longest}
+
+
+# --------------------------------------------------------------------------
+# Local-time helpers. DST-safe via time.tzset() + naive-local round trips
+# (datetime.fromtimestamp()/astimezone() on naive datetimes correctly resolve
+# the offset for that *specific* date via the platform's tzdata, rather than
+# baking in "now"'s offset).
+# --------------------------------------------------------------------------
+
+def init_timezone() -> None:
+    if hasattr(time, "tzset"):
+        time.tzset()
+
+
+def local_today(now_ts: int) -> date:
+    return datetime.fromtimestamp(now_ts).date()
+
+
+def local_date_for_ts(ts: int) -> date:
+    return datetime.fromtimestamp(ts).date()
+
+
+def local_midnight_iso(now_ts: int, days_back: int) -> str:
+    target = local_today(now_ts) - timedelta(days=days_back)
+    naive_midnight = datetime(target.year, target.month, target.day)
+    return naive_midnight.astimezone().isoformat()
+
+
+def local_tz_string(now_ts: int) -> str:
+    return datetime.fromtimestamp(now_ts).astimezone().strftime("%z")
+
+
+# --------------------------------------------------------------------------
+# Git subprocess helpers (read-only; never shell=True)
+# --------------------------------------------------------------------------
+
+def run_git(repo_path: str | None, extra_args: list[str], timeout: int = GIT_TIMEOUT):
+    """Run a read-only git command. Returns (returncode_or_None, stdout, stderr).
+
+    returncode is None only for a timeout or an OSError starting the process
+    (e.g. git missing); the caller treats that the same as a non-zero exit.
+    """
+    env = dict(os.environ)
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["LC_ALL"] = "C"
+    cmd = ["git"] + GIT_BASE_ARGS
+    if repo_path is not None:
+        cmd += ["-C", repo_path]
+    cmd += extra_args
+    try:
+        proc = subprocess.run(
+            cmd, env=env, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "", f"timed out after {timeout}s"
+    except OSError as exc:
+        return None, "", str(exc)
+    return (
+        proc.returncode,
+        proc.stdout.decode("utf-8", "replace"),
+        proc.stderr.decode("utf-8", "replace"),
+    )
+
+
+def detect_since_flag() -> str:
+    """Prefer --since-as-filter (git >= 2.32): plain --since prunes traversal
+    at the first commit older than the cutoff, which silently misses older
+    commits reachable *behind* a non-monotonic (e.g. rebased) commit date.
+    Confirmed empirically in a synthetic repo during development; see the
+    collector report for the reproduction. Falls back to --since on old git.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_TIMEOUT
+        )
+        text = proc.stdout.decode("utf-8", "replace")
+        m = re.search(r"(\d+)\.(\d+)", text)
+        if m and (int(m.group(1)), int(m.group(2))) >= (2, 32):
+            return "--since-as-filter"
+    except Exception:
+        pass
+    return "--since"
+
+
+def get_git_config_value(repo_path: str | None, args: list[str]) -> tuple[str | None, int | None, str]:
+    """Runs `git config <args>`. Returns (value_or_None, returncode, stderr).
+
+    Exit code 1 means "not set" (value=None, not an error); any other
+    non-zero code is a real problem the caller may want to warn about.
+    """
+    rc, out, err = run_git(repo_path, ["config"] + args)
+    if rc == 0:
+        stripped = out.strip("\n")
+        return (stripped if stripped else None), rc, err
+    return None, rc, err
+
+
+def get_global_identity(warnings: list[str]) -> tuple[str | None, str | None]:
+    email, rc, err = get_git_config_value(None, ["--global", "--get", "user.email"])
+    if rc not in (0, 1):
+        warnings.append(f"git config --global user.email failed (exit {rc}): {err.strip()[:200]}")
+    name, rc, err = get_git_config_value(None, ["--global", "--get", "user.name"])
+    if rc not in (0, 1):
+        warnings.append(f"git config --global user.name failed (exit {rc}): {err.strip()[:200]}")
+    return email, name
+
+
+def get_local_repo_config(repo_path: str) -> tuple[str | None, str | None, dict[str, str], str | None]:
+    """One `git config --local --list` call per repo, read unconditionally
+    (not just for default-identity resolution): remote detection needs it
+    regardless of whether --author was given explicitly.
+
+    Returns (email, name, remote_urls_by_name, warning_or_None). Only
+    `remote.<name>.url` entries are collected -- never any other value --
+    and the raw URL only ever flows into remote_to_web_url(), which never
+    returns or logs it; see that function's docstring.
+    """
+    rc, out, err = run_git(repo_path, ["config", "--local", "--list"])
+    if rc not in (0, 1):
+        return None, None, {}, f"{repo_path}: git config --local --list failed (exit {rc}): {err.strip()[:200]}"
+    email = name = None
+    remotes: dict[str, str] = {}
+    for line in out.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if key == "user.email":
+            email = value
+        elif key == "user.name":
+            name = value
+        elif key.startswith("remote.") and key.endswith(".url"):
+            remote_name = key[len("remote."):-len(".url")]
+            if remote_name:
+                remotes[remote_name] = value
+    return email, name, remotes, None
+
+
+def pick_remote_url(remotes: dict[str, str]) -> str | None:
+    """Prefer 'origin'; otherwise the first remote in config-file order."""
+    if "origin" in remotes:
+        return remotes["origin"]
+    for url in remotes.values():
+        return url
+    return None
+
+
+# --------------------------------------------------------------------------
+# Repo discovery
+# --------------------------------------------------------------------------
+
+def is_repo(path: str) -> bool:
+    # A .git entry (dir or file -- worktrees/submodules use a file) marks a repo.
+    return os.path.lexists(os.path.join(path, ".git"))
+
+
+def discover_repos(root_real: str, max_depth: int) -> list[str]:
+    found: list[str] = []
+
+    def visit(path: str, depth: int) -> None:
+        if is_repo(path):
+            found.append(path)
+            return
+        if depth >= max_depth:
+            return
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)
+        except OSError:
+            return
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") or name in PRUNE_DIR_NAMES:
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            visit(entry.path, depth + 1)
+
+    visit(root_real, 0)
+    return found
+
+
+def resolve_roots(root_args: list[str], warnings: list[str]) -> list[str]:
+    reals: list[str] = []
+    for r in root_args:
+        expanded = os.path.expanduser(os.path.expandvars(r))
+        if not os.path.isdir(expanded):
+            warnings.append(f"root not found or not a directory: {r!r} (resolved {expanded!r})")
+            continue
+        reals.append(os.path.realpath(expanded))
+    reals = sorted(set(reals), key=len)
+    kept: list[str] = []
+    for real in reals:
+        if any(real == k or real.startswith(k + os.sep) for k in kept):
+            continue
+        kept.append(real)
+    return kept
+
+
+def dedupe_paths(paths: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for p in paths:
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        out.append(p)
+    return out
+
+
+def attribution_order(repo_paths: list[str]) -> list[str]:
+    """Clones of one repository share commits; each commit is credited to the
+    least nested copy -- the working clone rather than a backup or audit copy
+    further down -- with ties broken by path."""
+    return sorted(repo_paths, key=lambda p: (p.rstrip(os.sep).count(os.sep), p))
+
+
+def compute_repo_names(repo_paths: list[str]) -> dict[str, str]:
+    """Display name per repository: its folder name. When clones share a
+    folder name, the least nested one keeps it (it is also the one credited
+    first, see attribution_order) and the others get their parent folder as a
+    prefix; a tie at the top prefixes all of them. Names stay unique: anything
+    still ambiguous falls back to its home-relative path."""
+    def depth(p: str) -> int:
+        return p.rstrip(os.sep).count(os.sep)
+
+    groups: dict[str, list[str]] = defaultdict(list)
+    for p in repo_paths:
+        groups[os.path.basename(p.rstrip(os.sep))].append(p)
+    names = {}
+    for base, paths in groups.items():
+        top = min(depth(p) for p in paths)
+        at_top = [p for p in paths if depth(p) == top]
+        for p in paths:
+            if len(paths) == 1 or (len(at_top) == 1 and p == at_top[0]):
+                names[p] = base
+            else:
+                names[p] = os.path.basename(os.path.dirname(p.rstrip(os.sep))) + "/" + base
+    counts = Counter(names.values())
+    home = os.path.expanduser("~")
+    for p, name in list(names.items()):
+        if counts[name] > 1:
+            names[p] = "~/" + os.path.relpath(p, home) if p.startswith(home + os.sep) else p
+    return names
+
+
+def resolve_watch_path(repo_path: str) -> str | None:
+    """Resolve the path the bar widget should watch for near-instant refresh.
+
+    Prefers <gitdir>/logs (the reflog directory, touched on every commit or
+    ref update). A brand new repo has no reflog at all until its first
+    commit, so until then this falls back to the gitdir itself instead: the
+    widget also watches for a `create` event there, and reacts once a path
+    ending in "/logs" or "/HEAD" appears -- which the first commit produces.
+
+    Handles both a .git directory and a .git file (`gitdir: <path>`, used by
+    linked worktrees and submodules -- the path may be relative to
+    repo_path, as it is for submodules; worktrees use an absolute path).
+    """
+    git_entry = os.path.join(repo_path, ".git")
+    try:
+        if os.path.isdir(git_entry):
+            gitdir = git_entry
+        elif os.path.isfile(git_entry):
+            with open(git_entry, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read().strip()
+            if not content.startswith("gitdir:"):
+                return None
+            raw = content[len("gitdir:"):].strip()
+            if not raw:
+                return None
+            gitdir = raw if os.path.isabs(raw) else os.path.normpath(os.path.join(repo_path, raw))
+        else:
+            return None
+    except OSError:
+        return None
+    logs_dir = os.path.join(gitdir, "logs")
+    if os.path.isdir(logs_dir):
+        return logs_dir
+    return gitdir if os.path.isdir(gitdir) else None
+
+
+# --------------------------------------------------------------------------
+# git log output parsing
+# --------------------------------------------------------------------------
+
+def extract_basename(path: str) -> str:
+    if " => " in path:
+        path = path.split(" => ", 1)[-1]
+    path = path.strip("{}")
+    return path.rsplit("/", 1)[-1]
+
+
+def summarize_numstat(rows: list[tuple[str, str, str]]) -> tuple[int, int, int]:
+    """added, deleted (lockfiles excluded from these two only), files (all non-binary)."""
+    added = deleted = files = 0
+    for a, d, path in rows:
+        if a == "-" and d == "-":
+            continue  # binary: excluded entirely
+        files += 1
+        if extract_basename(path) in LOCKFILE_BASENAMES:
+            continue  # excluded from line counts only
+        added += int(a)
+        deleted += int(d)
+    return added, deleted, files
+
+
+def parse_log_output(raw: str) -> list[dict]:
+    """Parse `git log [--numstat] --format=LOG_FORMAT` output.
+
+    Numstat rows are parsed whenever present; a call made without --numstat
+    (e.g. the unpushed query, which needs no line stats) simply yields
+    numstat=(0, 0, 0) for every record, which its caller ignores.
+    """
+    records = []
+    if not raw:
+        return records
+    for chunk in raw.split(RECORD_MARK):
+        if not chunk:
+            continue
+        nl = chunk.find("\n")
+        header, rest = (chunk, "") if nl == -1 else (chunk[:nl], chunk[nl + 1:])
+        fields = header.split(US, 5)
+        if len(fields) < 6:
+            continue
+        h, at_s, ae, an, parents, subject = fields
+        # git writes these three itself; anything else is not a real record.
+        if not _HASH_RE.match(h) or not at_s.isdigit() or not all(_HASH_RE.match(x) for x in parents.split()):
+            continue
+        at = int(at_s)
+        rows = []
+        for line in rest.split("\n"):
+            if not line:
+                continue
+            parts = line.split("\t", 2)
+            if len(parts) != 3:
+                continue
+            rows.append((parts[0], parts[1], parts[2]))
+        records.append({
+            "hash": h,
+            "author_ts": at,
+            "author_email": ae,
+            "author_name": an,
+            "subject": subject,
+            "numstat": summarize_numstat(rows),
+        })
+    return records
+
+
+# --------------------------------------------------------------------------
+# Per-repo processing (runs in the thread pool)
+# --------------------------------------------------------------------------
+
+def process_repo(
+    repo_path: str,
+    author_patterns_explicit: list[str] | None,
+    global_email: str | None,
+    global_name: str | None,
+    include_merges: bool,
+    since_flag: str,
+    fetch_since_iso: str,
+) -> dict:
+    warnings: list[str] = []
+
+    local_email, local_name, remotes, cfg_warn = get_local_repo_config(repo_path)
+    if cfg_warn:
+        warnings.append(cfg_warn)
+    has_remote = bool(remotes)
+    web_base = remote_to_web_url(pick_remote_url(remotes)) if has_remote else None
+
+    if author_patterns_explicit is not None:
+        patterns = list(author_patterns_explicit)
+    else:
+        patterns = []
+        for v in (global_email, global_name, local_email, local_name):
+            if v and v not in patterns:
+                patterns.append(v)
+        if not patterns:
+            # No identity anywhere for this repo (no --author, no global or
+            # repo-local user.email/name): silently counting every author
+            # would be wrong data, not a safe default. Contribute nothing
+            # instead of guessing.
+            warnings.append(
+                f"no git identity for {repo_path}: set git user.email/user.name "
+                "or the widget's authors setting"
+            )
+            return {
+                "records": [], "warnings": warnings,
+                "has_remote": has_remote, "web_base": web_base,
+                "unpushed_hashes": set(),
+            }
+
+    ref_args = ["--branches", "--remotes", "--tags"]
+    # Merges: when included, they count as commits but contribute no lines --
+    # `git log --numstat` prints no diff at all for a merge commit unless
+    # -m/-c is passed, which we never do, so this falls out for free. Applied
+    # consistently to the unpushed query below too.
+    merge_args = [] if include_merges else ["--no-merges"]
+    # Fast git-side pre-filter only (substring match); author_matches()
+    # below is the actual, exact decision.
+    author_args = ["-F", "-i"] + [f"--author={p}" for p in patterns]
+
+    args = (
+        ["log"] + ref_args + merge_args + author_args
+        + [f"{since_flag}={fetch_since_iso}", "--numstat", f"--format={LOG_FORMAT}"]
+    )
+    rc, out, err = run_git(repo_path, args)
+    records = []
+    if rc != 0:
+        warnings.append(f"{repo_path}: git log failed (exit {rc}): {err.strip()[:200]}")
+    else:
+        for r in parse_log_output(out):
+            if not author_matches(patterns, r["author_email"], r["author_name"]):
+                continue
+            added, deleted, files = r["numstat"]
+            records.append({
+                "hash": r["hash"],
+                "author_ts": r["author_ts"],
+                "subject": r["subject"],
+                "added": added,
+                "deleted": deleted,
+                "files": files,
+            })
+
+    # Unpushed: all-time, not windowed -- commits on local branches that no
+    # remote-tracking ref contains. Only queried for repos that have a
+    # remote at all (a repo without one is local by design and must never
+    # cost an extra git process, let alone light the unpushed badge).
+    unpushed_hashes: set[str] = set()
+    if has_remote:
+        unpushed_args = (
+            ["log", "--branches", "--not", "--remotes"] + merge_args + author_args
+            + [f"--format={LOG_FORMAT}"]
+        )
+        urc, uout, uerr = run_git(repo_path, unpushed_args)
+        if urc != 0:
+            warnings.append(f"{repo_path}: git log --branches --not --remotes failed (exit {urc}): {uerr.strip()[:200]}")
+        else:
+            for r in parse_log_output(uout):
+                if not author_matches(patterns, r["author_email"], r["author_name"]):
+                    continue
+                unpushed_hashes.add(r["hash"])
+
+    return {
+        "records": records,
+        "warnings": warnings,
+        "has_remote": has_remote,
+        "web_base": web_base,
+        "unpushed_hashes": unpushed_hashes,
+    }
+
+
+def _empty_repo_day_stats() -> dict:
+    return {"commits": 0, "added": 0, "deleted": 0}
+
+
+def _bucket_records_by_day(records: list[dict], days_list: list[date], with_files: bool) -> dict[date, dict]:
+    """Shared day-bucketing for the strip and the history block: per-day
+    totals plus, per day, per-repo {commits, added, deleted} (the panel
+    shades a repo-filtered heatmap by lines, so each repo entry needs both).
+    """
+    entries = {
+        d: {
+            "commits": 0, "added": 0, "deleted": 0,
+            **({"files": 0} if with_files else {}),
+            "repo_stats": defaultdict(_empty_repo_day_stats),
+        }
+        for d in days_list
+    }
+    for r in records:
+        entry = entries[r["local_date"]]
+        entry["commits"] += 1
+        entry["added"] += r["added"]
+        entry["deleted"] += r["deleted"]
+        if with_files:
+            entry["files"] += r["files"]
+        rs = entry["repo_stats"][r["repo_name"]]
+        rs["commits"] += 1
+        rs["added"] += r["added"]
+        rs["deleted"] += r["deleted"]
+    return entries
+
+
+def _repos_out(repo_stats: dict[str, dict]) -> list[dict]:
+    ordered = sorted(repo_stats.items(), key=lambda kv: (-kv[1]["commits"], kv[0]))
+    return [
+        {"name": n, "commits": s["commits"], "added": s["added"], "deleted": s["deleted"]}
+        for n, s in ordered
+    ]
+
+
+# --------------------------------------------------------------------------
+# Orchestration
+# --------------------------------------------------------------------------
+
+def run(cfg: Config) -> dict:
+    warnings: list[str] = []
+    init_timezone()
+
+    roots = resolve_roots(cfg.roots, warnings)
+    repo_paths: list[str] = []
+    for root in roots:
+        repo_paths.extend(discover_repos(root, cfg.max_depth))
+    repo_paths = sorted(dedupe_paths(repo_paths))
+    names = compute_repo_names(repo_paths)
+
+    global_email, global_name = (None, None)
+    if cfg.author is None:
+        global_email, global_name = get_global_identity(warnings)
+
+    since_flag = detect_since_flag()
+    today_date = local_today(cfg.now)
+    window_start_date = today_date - timedelta(days=cfg.days - 1)
+    # Fetch window = the larger of the strip window and the history window,
+    # from one extra day before its start: git's --since(-as-filter) is
+    # committer-date based, so a commit whose committer date happens to
+    # precede its author date (the true criterion, applied in Python below)
+    # by less than a day could otherwise be missed. Normal workflows never
+    # produce more skew than that.
+    fetch_days = max(cfg.days, cfg.history_days)
+    fetch_since_iso = local_midnight_iso(cfg.now, fetch_days)
+
+    results_by_path: dict[str, dict] = {}
+    if repo_paths:
+        max_workers = min(8, os.cpu_count() or 4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {
+                ex.submit(
+                    process_repo, path, cfg.author, global_email, global_name,
+                    cfg.include_merges, since_flag, fetch_since_iso,
+                ): path
+                for path in repo_paths
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                path = futures[fut]
+                try:
+                    result = fut.result()
+                except Exception as exc:  # defensive: one bad repo must not crash the run
+                    result = {
+                        "records": [], "warnings": [f"{path}: unexpected error: {exc}"],
+                        "has_remote": False, "web_base": None, "unpushed_hashes": set(),
+                    }
+                results_by_path[path] = result
+                warnings.extend(result["warnings"])
+
+    has_remote_by_name: dict[str, bool] = {}
+    web_base_by_name: dict[str, str | None] = {}
+    unpushed_by_name: dict[str, set] = {}
+    for path in repo_paths:
+        result = results_by_path.get(path)
+        if result is None:
+            continue
+        name = names[path]
+        has_remote_by_name[name] = result["has_remote"]
+        web_base_by_name[name] = result["web_base"]
+        unpushed_by_name[name] = result["unpushed_hashes"]
+
+    # Global dedupe across repos/refs by SHA; the first occurrence in
+    # attribution order (least nested clone first) gets the credit.
+    credit_order = attribution_order(repo_paths)
+    all_records = []
+    for path in credit_order:
+        for rec in results_by_path.get(path, {}).get("records", []):
+            rec = dict(rec)
+            rec["repo_name"] = names[path]
+            rec["local_date"] = local_date_for_ts(rec["author_ts"])
+            all_records.append(rec)
+
+    seen_hashes: set = set()
+    deduped = []
+    for rec in all_records:
+        key = dedupe_key(rec["hash"])
+        if key in seen_hashes:
+            continue
+        seen_hashes.add(key)
+        deduped.append(rec)
+
+    window_records = [r for r in deduped if window_start_date <= r["local_date"] <= today_date]
+
+    # unpushed: its own dedupe domain (all-time, cross-repo by SHA), only
+    # from repos that have a remote; first occurrence in sorted-path order.
+    unpushed_repo_counts: Counter = Counter()
+    seen_unpushed: set = set()
+    for path in credit_order:
+        name = names[path]
+        if not has_remote_by_name.get(name):
+            continue
+        for h in unpushed_by_name.get(name, ()):
+            if h in seen_unpushed:
+                continue
+            seen_unpushed.add(h)
+            unpushed_repo_counts[name] += 1
+    unpushed_out = {
+        "commits": sum(unpushed_repo_counts.values()),
+        "repos": [
+            {"name": n, "commits": c}
+            for n, c in sorted(unpushed_repo_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ],
+    }
+
+    level_mode, thresholds = compute_thresholds(cfg.level_mode, cfg.metric, cfg.fixed_levels)
+
+    days_list = [window_start_date + timedelta(days=i) for i in range(cfg.days)]
+    day_entries = _bucket_records_by_day(window_records, days_list, with_files=True)
+
+    days_out = []
+    total_commits = total_added = total_deleted = 0
+    for d in days_list:
+        entry = day_entries[d]
+        value = entry["commits"] if cfg.metric == "commits" else (entry["added"] + entry["deleted"])
+        level = level_for_value(value, thresholds)
+        days_out.append({
+            "date": d.isoformat(),
+            "commits": entry["commits"],
+            "added": entry["added"],
+            "deleted": entry["deleted"],
+            "files": entry["files"],
+            "level": level,
+            "repos": _repos_out(entry["repo_stats"]),
+        })
+        total_commits += entry["commits"]
+        total_added += entry["added"]
+        total_deleted += entry["deleted"]
+
+    watch = sorted(
+        d for path in repo_paths
+        if (d := resolve_watch_path(path)) is not None
+    )
+
+    output = {
+        "version": 1,
+        "generatedAt": int(cfg.now),
+        "timezone": local_tz_string(cfg.now),
+        "metric": cfg.metric,
+        "levelMode": level_mode,
+        "thresholds": list(thresholds),
+        "days": days_out,
+        "totals": {"commits": total_commits, "added": total_added, "deleted": total_deleted},
+        "repoCount": len(repo_paths),
+        "unpushed": unpushed_out,
+        "watch": watch,
+        "warnings": warnings,
+    }
+
+    if cfg.history_days > 0:
+        output["history"] = build_history_block(
+            cfg, deduped, today_date, thresholds,
+            has_remote_by_name, web_base_by_name, unpushed_by_name,
+        )
+
+    return output
+
+
+def build_history_block(
+    cfg: Config,
+    deduped: list[dict],
+    today_date: date,
+    thresholds: tuple[int, int, int, int],
+    has_remote_by_name: dict[str, bool],
+    web_base_by_name: dict[str, str | None],
+    unpushed_by_name: dict[str, set],
+) -> dict:
+    history_start_date = today_date - timedelta(days=cfg.history_days - 1)
+    history_records = [r for r in deduped if history_start_date <= r["local_date"] <= today_date]
+
+    days_list = [history_start_date + timedelta(days=i) for i in range(cfg.history_days)]
+    day_entries = _bucket_records_by_day(history_records, days_list, with_files=False)
+
+    days_out = []
+    active_flags = []
+    total_commits = total_added = total_deleted = active_days = 0
+    for d in days_list:
+        entry = day_entries[d]
+        value = entry["commits"] if cfg.metric == "commits" else (entry["added"] + entry["deleted"])
+        level = level_for_value(value, thresholds)
+        days_out.append({
+            "date": d.isoformat(),
+            "commits": entry["commits"],
+            "added": entry["added"],
+            "deleted": entry["deleted"],
+            "level": level,
+            "repos": _repos_out(entry["repo_stats"]),
+        })
+        total_commits += entry["commits"]
+        total_added += entry["added"]
+        total_deleted += entry["deleted"]
+        active = entry["commits"] > 0
+        active_flags.append(active)
+        if active:
+            active_days += 1
+
+    streak = compute_streak(active_flags)
+
+    commits_sorted = sorted(history_records, key=lambda r: (-r["author_ts"], r["repo_name"], r["hash"]))
+    commits_out = []
+    for r in commits_sorted[: cfg.commits]:
+        name = r["repo_name"]
+        has_remote = has_remote_by_name.get(name, False)
+        pushed = has_remote and r["hash"] not in unpushed_by_name.get(name, ())
+        base = web_base_by_name.get(name)
+        url = commit_url(base, r["hash"]) if (pushed and base) else None
+        commits_out.append({
+            "hash": r["hash"],
+            "short": r["hash"][:7],
+            "repo": name,
+            "subject": r["subject"][:200],
+            "ts": r["author_ts"],
+            "date": r["local_date"].isoformat(),
+            "added": r["added"],
+            "deleted": r["deleted"],
+            "pushed": pushed,
+            "url": url,
+        })
+
+    repo_counts = Counter(r["repo_name"] for r in history_records)
+    repos_out = [
+        {"name": n, "commits": c, "url": web_base_by_name.get(n)}
+        for n, c in sorted(repo_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+    return {
+        "days": days_out,
+        "commits": commits_out,
+        "repos": repos_out,
+        "streak": streak,
+        "totals": {
+            "commits": total_commits, "added": total_added,
+            "deleted": total_deleted, "activeDays": active_days,
+        },
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        cfg = parse_config(argv)
+    except ArgError as e:
+        print(json.dumps({"version": 1, "error": str(e)}))
+        return 1
+    try:
+        output = run(cfg)
+    except Exception as e:  # last-resort safety net; specific failures become warnings above
+        print(json.dumps({"version": 1, "error": f"internal error: {e}"}))
+        return 1
+    print(json.dumps(output, indent=2 if cfg.pretty else None))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

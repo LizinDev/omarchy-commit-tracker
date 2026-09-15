@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.lizindev.commit-tracker",
+  "name": "Commit Tracker",
+  "version": "1.1.0",
+  "author": "LizinDev",
+  "description": "GitHub-style daily commit activity in the bar, with a history panel, streaks and links to your commits",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Commit Tracker",
+    "description": "One box per day for the last few days, shaded by how much you committed. Left click opens a contribution graph with streaks, a repository filter and your commits (click one to open it on GitHub); right click opens the settings.",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "days": 5,
+      "roots": ["~"],
+      "maxDepth": 4,
+      "authors": [],
+      "metric": "commits",
+      "levels": "default",
+      "includeMerges": false,
+      "refreshIntervalSec": 300,
+      "appearance": "theme",
+      "color": "accent",
+      "highlightToday": true,
+      "showUnpushed": true,
+      "graphWeeks": 26
+    },
+    "schema": [
+      { "key": "days", "type": "integer", "label": "Days shown", "min": 1, "max": 31, "step": 1, "defaultValue": 5 },
+      { "key": "roots", "type": "string", "label": "Folders to scan", "defaultValue": "~", "description": "Where to look for git repositories: a JSON array or a comma-separated list of paths." },
+      { "key": "maxDepth", "type": "integer", "label": "Scan depth", "min": 0, "max": 8, "step": 1, "defaultValue": 4, "description": "How many folder levels below each scan folder to search for repositories." },
+      { "key": "authors", "type": "string", "label": "Authors", "defaultValue": "", "description": "Emails or names to count (exact, case-insensitive), as a JSON array or comma-separated list. Empty uses your git user.email and user.name." },
+      { "key": "metric", "type": "enum", "label": "Intensity by", "options": ["commits", "lines"], "defaultValue": "commits", "description": "Shade boxes by commit count or by lines changed." },
+      { "key": "levels", "type": "string", "label": "Intensity levels", "defaultValue": "default", "description": "default shades at 1, 2, 4 and 8 commits (1, 50, 200 and 800 lines); or give four ascending lower bounds such as 1,3,6,10." },
+      { "key": "includeMerges", "type": "boolean", "label": "Count merge commits", "defaultValue": false },
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 15, "max": 3600, "step": 15, "defaultValue": 300, "description": "Safety-net poll. Local commits refresh within seconds through a file watcher." },
+      { "key": "appearance", "type": "enum", "label": "Colors", "options": ["theme", "github"], "defaultValue": "theme", "description": "theme follows the Omarchy theme; github uses GitHub's green contribution colors." },
+      { "key": "color", "type": "string", "label": "Theme color", "defaultValue": "accent", "description": "With theme colors: a theme role (accent, foreground, urgent, muted) or a hex color." },
+      { "key": "highlightToday", "type": "boolean", "label": "Outline today", "defaultValue": true },
+      { "key": "showUnpushed", "type": "boolean", "label": "Dot for unpushed commits", "defaultValue": true },
+      { "key": "graphWeeks", "type": "integer", "label": "History graph weeks", "min": 4, "max": 53, "step": 1, "defaultValue": 26 }
+    ]
+  }
+}
