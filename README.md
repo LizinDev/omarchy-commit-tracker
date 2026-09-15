@@ -27,6 +27,8 @@ your theme's accent color or GitHub's greens. Click it for the whole picture.
   Every change is saved to `shell.json` straight away.
 - **Middle click** refreshes.
 
+![The history panel: contribution graph, streaks, repository picker and commits](history-panel.png)
+
 Colors come from the active Omarchy theme (its accent mixed into the theme
 background) and change with it when you switch themes. With GitHub colors the
 dark or light set is picked from how dark the theme is.
