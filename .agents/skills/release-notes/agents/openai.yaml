@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Tracker release notes"
+  short_description: "Draft user-facing notes from an inventoried git range"
+  default_prompt: "Use $release-notes to inventory the Commit Tracker git range and draft user-facing release notes, without tagging, pushing or editing manifest.json."

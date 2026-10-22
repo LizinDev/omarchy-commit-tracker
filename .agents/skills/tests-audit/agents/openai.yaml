@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Tracker tests audit"
+  short_description: "Audit local test correctness, drift and measured cost"
+  default_prompt: "Use $tests-audit to check which Commit Tracker tests protect real behavior, using isolated perturbation and local runs, before proposing changes."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Commit Tracker performance"
+  short_description: "Measure collector refresh cost with a git log oracle"
+  default_prompt: "Use $performance-optimization to measure what a Commit Tracker refresh or history-panel run costs and verify any change against git log before claiming a speedup."
