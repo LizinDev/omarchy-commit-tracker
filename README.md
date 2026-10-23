@@ -4,6 +4,9 @@ A GitHub-style contribution strip for the [Omarchy](https://omarchy.org/) 4 bar:
 one box per day for the last five days, shaded by how much you committed, in
 your theme's accent color or GitHub's greens. Click it for the whole picture.
 
+Omarchy is an Arch Linux and Hyprland desktop setup by DHH; this is a plugin for
+its bar.
+
 ![Commit Tracker in the bar](preview.png)
 
 ## Using it
@@ -83,6 +86,8 @@ rsync -a --delete --exclude .git --exclude tests --exclude __pycache__ \
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.github.lizindev.commit-tracker --section left --index 0
 ```
+
+To uninstall it, run `omarchy plugin remove io.github.lizindev.commit-tracker`.
 
 The plugin folder must be a real copy: `omarchy plugin validate` rejects
 symlinks inside it, and the shell's file watcher does not follow a symlinked
@@ -192,3 +197,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 `Widget.qml` is the bar widget, `HistoryPanel.qml` and `SettingsMenu.qml` its
 two popups, `Heatmap.qml` the graph, and `bin/commit-tracker` the collector;
 the JSON above is the contract between them.
+
+## License
+
+[MIT](LICENSE).
