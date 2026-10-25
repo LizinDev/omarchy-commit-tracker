@@ -178,19 +178,40 @@ BarWidget {
     root.unpushed = state.unpushed
     root.errorText = state.errorText
     root.loaded = state.loaded
-    stripChanged()
+    stripChanged(false)
+    // A strip computed by a peer's history run can bring new paths to watch.
+    syncWatcher()
   }
 
   // After every new strip result: the hovered tooltip and an open history
-  // panel follow it.
-  function stripChanged() {
+  // panel follow it. A result that came from a history run needs no second
+  // one.
+  function stripChanged(fromHistory) {
     refreshHoveredTooltip()
-    if (root.panelOpen) historyDebounce.restart()
+    if (root.panelOpen && !fromHistory) historyDebounce.restart()
+  }
+
+  // The instance whose history panel is open, if any.
+  function panelViewer() {
+    if (root.panelOpen) return root
+    var items = peers()
+    for (var i = 0; i < items.length; i++) {
+      var peer = items[i]
+      if (peer && peer !== root && peer.panelOpen === true && typeof peer.refreshHistory === "function") return peer
+    }
+    return null
   }
 
   // -------------------------------------------------------------- collector
 
   function runCollector() {
+    // The history run prints the same strip as a plain run, so while the
+    // panel is open it serves both: one scan per refresh instead of two.
+    var viewer = panelViewer()
+    if (viewer) {
+      viewer.refreshHistory()
+      return
+    }
     if (collector.running) {
       refreshQueued = true
       return
@@ -208,14 +229,21 @@ BarWidget {
     // A result computed for settings that have changed since is dropped; the
     // settings change already queued a fresh run.
     if (runKey !== JSON.stringify(collectorCommand)) return
+    applyStrip(parseOutput(text), false)
+  }
 
+  // The collector's JSON object, or { error } when there is none to read.
+  function parseOutput(text) {
     var raw = String(text || "").trim()
     var data = null
     try { data = raw ? JSON.parse(raw) : null } catch (e) { data = null }
+    if (!data || typeof data !== "object")
+      return { error: raw ? "Collector output was not valid JSON" : "Collector produced no output" }
+    return data
+  }
 
-    if (!data || typeof data !== "object") {
-      errorText = raw ? "Collector output was not valid JSON" : "Collector produced no output"
-    } else if (data.error) {
+  function applyStrip(data, fromHistory) {
+    if (data.error) {
       errorText = String(data.error)
     } else if (!isList(data.days)) {
       errorText = "Collector output has no days"
@@ -228,7 +256,7 @@ BarWidget {
       errorText = ""
       loaded = true
     }
-    stripChanged()
+    stripChanged(fromHistory)
     publish()
     syncWatcher()
   }
@@ -248,6 +276,7 @@ BarWidget {
   // The panel's graph and commit list come from a second, heavier collector
   // run with --history-days. It belongs to whichever instance shows the panel
   // (the monitor that was clicked), so it never goes through the leader.
+  // While the panel is open, this run also feeds the strip (runCollector()).
 
   property var history: null
   property bool historyLoading: false
@@ -285,13 +314,12 @@ BarWidget {
     historyLoading = false
     if (historyKey !== JSON.stringify(historyCommand)) return
 
-    var raw = String(text || "").trim()
-    var data = null
-    try { data = raw ? JSON.parse(raw) : null } catch (e) { data = null }
+    // historyCommand extends collectorCommand, so the same key check holds
+    // for the strip this run printed alongside the history.
+    var data = parseOutput(text)
+    applyStrip(data, true)
 
-    if (!data || typeof data !== "object") {
-      historyError = raw ? "Collector output was not valid JSON" : "Collector produced no output"
-    } else if (data.error) {
+    if (data.error) {
       historyError = String(data.error)
     } else if (!data.history || typeof data.history !== "object") {
       historyError = "This collector has no history mode"
@@ -337,6 +365,7 @@ BarWidget {
   function openPanel() {
     hideStripTooltip()
     settingsOpen = false
+    panelWanted = true
     panelOpen = true
     refreshHistory()
   }
@@ -344,6 +373,7 @@ BarWidget {
   function openSettings() {
     hideStripTooltip()
     panelOpen = false
+    settingsWanted = true
     settingsOpen = true
   }
 
@@ -676,9 +706,15 @@ BarWidget {
 
   // ---------------------------------------------------------------- popups
 
+  // Each popup is a full-screen layer-shell window: built the first time it
+  // opens and kept from then on, so a popup nobody opens costs nothing.
+  property bool panelWanted: false
+  property bool settingsWanted: false
+
   Loader {
     id: panelLoader
-    active: true
+    active: root.panelWanted
+    asynchronous: true
     visible: false
     source: Qt.resolvedUrl("HistoryPanel.qml")
     onLoaded: item.host = root
@@ -686,7 +722,8 @@ BarWidget {
 
   Loader {
     id: settingsLoader
-    active: true
+    active: root.settingsWanted
+    asynchronous: true
     visible: false
     source: Qt.resolvedUrl("SettingsMenu.qml")
     onLoaded: item.host = root

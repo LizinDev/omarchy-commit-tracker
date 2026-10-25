@@ -116,25 +116,49 @@ Item {
     }
   }
 
+  readonly property int cellRadius: Math.min(Style.cornerRadius, Math.floor(cellSize / 4))
+
+  // Cell of the selected day, -1 when none is in range.
+  readonly property int selectedCell: {
+    if (selectedDate === "") return -1
+    for (var i = 0; i < days.length; i++) if (days[i].date === selectedDate) return i + leading
+    return -1
+  }
+
+  // Cells never read the hover or the selection, so moving the pointer
+  // re-evaluates the two outlines below instead of every cell.
   Repeater {
     model: root.weeks * 7
 
     Rectangle {
       required property int index
       readonly property var day: root.dayAtCell(index)
-      readonly property bool marked: day !== null && (day.date === root.selectedDate || index === root.hoveredCell)
 
       visible: day !== null
       x: root.labelGutter + Math.floor(index / 7) * root.pitch
       y: root.monthRowHeight + (index % 7) * root.pitch
       width: root.cellSize
       height: root.cellSize
-      radius: Math.min(Style.cornerRadius, Math.floor(root.cellSize / 4))
+      radius: root.cellRadius
       color: Palette.levelColor(root.levelOf(day), root.appearance, root.surface, root.ink, root.base)
-      border.width: marked ? 1 : 0
-      border.color: Util.alpha(root.ink, 0.85)
     }
   }
+
+  component CellOutline: Rectangle {
+    property int cell: -1
+    visible: root.dayAtCell(cell) !== null
+    x: root.labelGutter + Math.floor(cell / 7) * root.pitch
+    y: root.monthRowHeight + (cell % 7) * root.pitch
+    width: root.cellSize
+    height: root.cellSize
+    radius: root.cellRadius
+    color: "transparent"
+    border.width: 1
+    border.color: Util.alpha(root.ink, 0.85)
+  }
+
+  CellOutline { cell: root.selectedCell }
+  CellOutline { cell: root.hoveredCell }
 
   MouseArea {
     x: root.labelGutter
