@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lizindev.commit-tracker",
   "name": "Commit Tracker",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "LizinDev",
   "description": "GitHub-style daily commit activity in the bar, with a history panel, streaks and links to your commits",
   "kinds": ["bar-widget"],
