@@ -9,13 +9,12 @@ streaks). Stdlib only.
 from __future__ import annotations
 
 import argparse
-import concurrent.futures
 import json
 import os
 import re
-import secrets
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -40,7 +39,7 @@ GIT_TIMEOUT = 10  # seconds; a hung repo becomes a warning, never a hang.
 # separator can be forged: a commit subject containing it would split into
 # extra, invented commits, and nobody can plant a per-run random token in a
 # subject ahead of time.
-RECORD_TOKEN = secrets.token_hex(8)
+RECORD_TOKEN = os.urandom(8).hex()  # what secrets.token_hex(8) does, without its imports
 RECORD_MARK = "\x1e" + RECORD_TOKEN + "\x1e"
 US = "\x1f"  # ASCII unit separator: separates fields within a header line.
 LOG_FORMAT = "%x1e" + RECORD_TOKEN + "%x1e%H%x1f%at%x1f%ae%x1f%an%x1f%P%x1f%s"
@@ -877,28 +876,40 @@ def run(cfg: Config) -> dict:
     fetch_days = max(cfg.days, cfg.history_days)
     fetch_since_iso = local_midnight_iso(cfg.now, fetch_days)
 
+    # Plain threads rather than concurrent.futures, whose import (logging and
+    # what it pulls in) costs about 16 ms, a tenth of a whole refresh;
+    # subprocess has already imported threading.
     results_by_path: dict[str, dict] = {}
-    if repo_paths:
-        max_workers = min(8, os.cpu_count() or 4)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {
-                ex.submit(
-                    process_repo, path, cfg.author, global_email, global_name,
+    pending = iter(repo_paths)
+    lock = threading.Lock()
+
+    def worker() -> None:
+        while True:
+            with lock:
+                path = next(pending, None)
+            if path is None:
+                return
+            try:
+                result = process_repo(
+                    path, cfg.author, global_email, global_name,
                     cfg.include_merges, since_flag, fetch_since_iso,
-                ): path
-                for path in repo_paths
-            }
-            for fut in concurrent.futures.as_completed(futures):
-                path = futures[fut]
-                try:
-                    result = fut.result()
-                except Exception as exc:  # defensive: one bad repo must not crash the run
-                    result = {
-                        "records": [], "warnings": [f"{path}: unexpected error: {exc}"],
-                        "has_remote": False, "web_base": None, "unpushed_hashes": set(),
-                    }
+                )
+            except Exception as exc:  # defensive: one bad repo must not crash the run
+                result = {
+                    "records": [], "warnings": [f"{path}: unexpected error: {exc}"],
+                    "has_remote": False, "web_base": None, "unpushed_hashes": set(),
+                }
+            with lock:
                 results_by_path[path] = result
-                warnings.extend(result["warnings"])
+
+    threads = [threading.Thread(target=worker) for _ in range(min(8, os.cpu_count() or 4, len(repo_paths)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # Repository order, not completion order, so identical runs print identical warnings.
+    for path in repo_paths:
+        warnings.extend(results_by_path[path]["warnings"])
 
     has_remote_by_name: dict[str, bool] = {}
     web_base_by_name: dict[str, str | None] = {}

@@ -1129,6 +1129,24 @@ class CommitTrackerCLITests(unittest.TestCase):
         self.assertFalse(rows["detached"]["pushed"])
         self.assertTrue(rows["base"]["pushed"])
 
+    def test_28_a_history_run_prints_the_same_strip_as_a_plain_run(self):
+        # While the panel is open the widget feeds the strip from the history
+        # run instead of running the collector twice.
+        self.set_global_identity("owner@example.com", "Owner")
+        repoA = self.make_repo("repoA")
+        repoB = self.make_repo("deep/repoB")
+        old = self.commit(repoA, {"a.txt": "a\n"}, "old", adate=iso(2026, 8, 1, 9), aemail="owner@example.com")
+        self.git(repoA, "remote", "add", "origin", "https://github.com/me/a.git")
+        self.git(repoA, "update-ref", "refs/remotes/origin/main", old)
+        self.commit(repoA, {"b.txt": "b\n"}, "recent", adate=iso(2026, 9, 2, 9), aemail="owner@example.com")
+        self.commit(repoB, {"c.txt": "c\nc\n"}, "other", adate=iso(2026, 9, 3, 9), aemail="owner@example.com")
+        self.make_repo("empty")
+        args = self.default_args(epoch(2026, 9, 3), days=5)
+        plain, _ = self.run_tool_json(args)
+        history, _ = self.run_tool_json(args + ["--history-days", "60", "--commits", "10"])
+        self.assertEqual(len(history.pop("history")["commits"]), 3)
+        self.assertEqual(plain, history)
+
 
 class RemoteUrlHardeningTests(unittest.TestCase):
     """Remote URLs come from repository config, which a cloned repository's

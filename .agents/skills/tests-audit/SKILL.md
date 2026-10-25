@@ -86,8 +86,8 @@ Families worth checking:
 - **Defaults.** CLI tests always pass `--root` and `--now`; the real `~` and
   the wall clock are untested by design. Do not add tests that read the real
   home directory.
-- **Order and flakiness.** `warnings` follow thread completion, so assert
-  membership, never order. Rerun only to test a named transient cause, and
+- **Order and flakiness.** `warnings` follow repository order (thread
+  completion until 2026-10-25); asserting membership stays the safer habit. Rerun only to test a named transient cause, and
   keep the first failure. A passing rerun does not establish a root cause.
 
 ## Classify and report

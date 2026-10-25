@@ -182,3 +182,24 @@ no phase measurement has confirmed it.
 
 The oracle therefore detects the regression that the unit suite misses.
 Re-run both rows before trusting them on a later revision.
+
+## Recorded on 2026-10-25
+
+Same host; git 2.56.0, Python 3.14.8; warm caches; medians of 11 runs,
+alternating with the `73ce012` collector.
+
+| Workload | Before | After |
+| --- | --- | --- |
+| Real `~`, depth 4, 26 repos, strip | 127 ms | 115 ms |
+| Real `~`, history (182 d, `--commits 300`) | 201 ms | 188 ms |
+| Empty root | 77 ms | 67 ms |
+| Real `~`, one refresh with the panel open | strip + history ≈ 328 ms | history only ≈ 188 ms |
+
+Normalized JSON was byte-identical before and after on `wl-big` (30 × 3000),
+`wl-small` (25 × 200) and the real `~`, strip and history runs; the oracle
+agreed on both synthetic workloads. Refuted with numbers, by Codex: dropping
+`dataclasses` (`argparse` on 3.14 imports it anyway), one `--get-regexp`
+instead of two `git config --global` calls, and 12 workers instead of 8.
+Not taken: folding `summarize_numstat()` into the parser (about 3 % on the
+90 000-commit history run, at the cost of a second copy of the binary and
+lockfile rule).

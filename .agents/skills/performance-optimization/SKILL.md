@@ -43,11 +43,13 @@ commit-tracker refresh`. Only the leader instance runs it (`pollTick()`).
 That is about 3 + 2–3 × N git processes. `--since-as-filter` walks all
 reachable history; the README puts that at about 0.3 s per 100 000 commits.
 
-**History run.** `openPanel()`, and every `stripChanged()` while the panel is
-open, starts `historyDebounce` (400 ms), which runs `historyCommand`: the strip
-command plus `--history-days=<whole weeks>` and `--commits=300`. With the
-panel open, every refresh is **two complete scans**, and the history output
-already includes its own `days` block.
+**History run.** `openPanel()` runs `historyCommand`: the strip command plus
+`--history-days=<whole weeks>` and `--commits=300`. Its top-level output is
+the strip itself (`test_28` holds that), so while a panel is open
+`runCollector()` hands every refresh to that instance's `refreshHistory()`
+and `applyHistory()` applies the strip too: one scan per refresh, not two.
+A strip result from elsewhere (a peer's) still restarts `historyDebounce`
+(400 ms).
 
 ## Correctness oracle: git log itself
 
@@ -56,8 +58,9 @@ Scripts and recipes are in
 
 - **Same output.** Before and after, with identical arguments and a fixed
   `--now`, the JSON must match after
-  `jq -S 'del(.generatedAt) | .warnings |= sort'`. Warnings are sorted because
-  their order follows thread completion.
+  `jq -S 'del(.generatedAt) | .warnings |= sort'`. Warnings are sorted
+  because, until 2026-10-25, their order followed thread completion; they
+  now follow repository order.
 - **Agreement with git.** `git_oracle.py` counts commits per day from
   `git log HEAD --branches --remotes --tags` with no `--since`, and must equal
   `days[].commits`. It shares no code with the collector: comparing the
@@ -80,10 +83,10 @@ Measure by phase (discovery, git processes, aggregation, JSON) before choosing:
 | Observed cost                          | Candidate correction                                                      | Condition to establish                                                 |
 | -------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | Discovery dominates (big `~`, depth 8) | Narrower `roots`/`maxDepth` (user settings), or prune a proven-useless name | No user repository sits under a pruned name; README states the rule     |
-| Two scans per refresh, panel open      | Feed the strip from the history run's `days` block while the panel is open | `runKey`/`historyKey` still drop stale results; strip output identical   |
+| Two scans per refresh, panel open      | Done: the history run feeds the strip while the panel is open              | `test_28`; `historyKey` covers the strip, since `historyCommand` extends `collectorCommand` |
 | `--numstat` volume in the history run  | Compute line stats only where they are needed                             | The lines-shaded graph and per-repository stats stay exact             |
 | Whole-history walk in a huge repo      | Leave it: correctness needs it. A commit-graph comes from the user's `git gc` | The collector stays read-only                                          |
-| Fixed startup per run                  | Leave it unless the poll interval shrinks drastically                     | Its measured share of a refresh                                        |
+| Fixed startup per run                  | Done for imports (`concurrent.futures`, `secrets`); what is left is the interpreter, `argparse` (~13 ms on 3.14) and 3 git processes | Leave `argparse`: its errors and abbreviations are contract |
 
 Do not add a cache, index or daemon without naming the work it removes, along
 with its **key, owner, invalidation and lifetime**. The collector keeps no
@@ -104,8 +107,9 @@ nothing may be written inside a scanned repository.
 - Dropping file caches needs root. Without it, report warm runs only and say
   so.
 
-The baseline recorded at `73ce012` is in the reference: real `~`, 25
-repositories, a strip run of 0.125–0.127 s and a history run of 0.192 s. At
+The baselines recorded at `73ce012` and on 2026-10-25 are
+in the reference: real `~`, 25–26 repositories, a strip run of about 0.115 s
+and a history run of about 0.19 s. At
 that scale a 5-minute poll costs nothing measurable. Only the history run on
 heavy histories (about 1 s for the synthetic 30 × 3000) merits a look, and
 only once a real workload shows it.
