@@ -1,0 +1,15 @@
+name: Feature request
+description: Something the strip, the panel or the settings could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you would like
+      placeholder: "Show the week's total next to the strip."
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What it would help with

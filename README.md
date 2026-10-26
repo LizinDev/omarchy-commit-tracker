@@ -1,5 +1,9 @@
 # Commit Tracker
 
+[![CI](https://github.com/LizinDev/omarchy-commit-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/LizinDev/omarchy-commit-tracker/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Omarchy 4](https://img.shields.io/badge/Omarchy-4.0.5-orange.svg)](https://omarchy.org/)
+
 A GitHub-style contribution strip for the [Omarchy](https://omarchy.org/) 4 bar:
 one box per day for the last five days, shaded by how much you committed, in
 your theme's accent color or GitHub's greens. Click it for the whole picture.
@@ -87,8 +91,7 @@ omarchy bar move io.github.lizindev.commit-tracker --section left --index 0
 From a local checkout:
 
 ```bash
-rsync -a --delete --exclude .git --exclude tests --exclude __pycache__ \
-  ./ ~/.config/omarchy/plugins/io.github.lizindev.commit-tracker/
+make install
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.github.lizindev.commit-tracker --section left --index 0
 ```
@@ -195,15 +198,27 @@ unusual (odd characters, dot segments, an IP address) gets no link. Errors are r
   a day earlier than its author date can be missed. Normal workflows never
   produce that.
 
+## Privacy
+
+Everything runs on your machine, and nothing is sent anywhere: the collector
+only reads your repositories with git and prints JSON for the bar. Commit
+links open in your browser when you click them. The strip and the panel show
+repository names and commit subjects, so keep that in mind before sharing a
+screenshot of the panel.
+
 ## Development
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+make dev      # install into ~/.config/omarchy/plugins and restart the shell
+make check    # lint (Python, shell, QML), tests, manifest validation
 ```
 
 `Widget.qml` is the bar widget, `HistoryPanel.qml` and `SettingsMenu.qml` its
 two popups, `Heatmap.qml` the graph, and `bin/commit-tracker` the collector;
-the JSON above is the contract between them.
+the JSON above is the contract between them. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers the rules the collector keeps and how to release,
+[CHANGELOG.md](CHANGELOG.md) what changed in each version, and
+[DEVLOG.md](DEVLOG.md) why.
 
 ## License
 
