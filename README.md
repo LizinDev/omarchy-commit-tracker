@@ -17,20 +17,26 @@ its bar.
   the date, commits, lines added and removed, and the repositories. A small dot
   after the strip means some of your commits are not on any remote yet; hover
   it to see where.
-- **Left click: history panel.** A contribution graph for the last six months
-  (or three months, or a year), your current and longest streak, and active
-  days. A searchable repository picker narrows everything to one repository
-  (so does clicking a repository name in the list), and clicking a day narrows
-  the list to that day. Clicking a commit opens it on GitHub, GitLab or
-  Bitbucket; a commit with nowhere to open (not pushed yet, or a remote with no
-  web page) copies its hash instead. Keys: `r` refresh, `s` settings, `a`
-  clear the filters, `Esc` close.
+- **Left click: history panel.** It opens on your GitHub id (the `githubId`
+  setting, or inferred from your repositories' GitHub remotes) and a line that
+  sums up the period, which turns into a readout of the day or commit under
+  the pointer. The contribution graph spans the panel (six months, or three,
+  or a year), and a slim rail on the bar's side of the panel keeps your current
+  and longest streak and active days in view. Under the graph, `All
+  repositories` opens a searchable repository filter, and a picked day shows
+  as a filter you can clear; clicking a repository name in the list filters
+  too. The commits read as a logbook: a timeline grouped by day, densely
+  packed, with a red dot on commits no remote has yet, and the graph outlines
+  a commit's day while you hover it. Clicking a commit opens it on GitHub,
+  GitLab or Bitbucket; a commit with nowhere to open (not pushed yet, or a
+  remote with no web page) copies its hash instead. Keys: `r` refresh, `s`
+  settings, `a` clear the filters, `Esc` close.
 - **Right click: settings.** Days shown, commits or lines, theme or GitHub
   colors, graph length, outline today, the unpushed dot, and merge commits.
   Every change is saved to `shell.json` straight away.
 - **Middle click** refreshes.
 
-![The history panel: contribution graph, streaks, repository picker and commits](history-panel.png)
+![The history panel: GitHub id, contribution graph, repository filter, commit timeline and streak rail](history-panel.png)
 
 Colors come from the active Omarchy theme (its accent mixed into the theme
 background) and change with it when you switch themes. With GitHub colors the
@@ -119,6 +125,7 @@ omarchy bar set io.github.lizindev.commit-tracker roots '["~/Projects", "~/Work"
 | `roots` | `["~"]` | Folders to search for repositories (array or comma-separated). |
 | `maxDepth` | `4` | Folder levels below each root to search. |
 | `authors` | `[]` | Emails or names to count; empty uses your git identity. |
+| `githubId` | `""` | GitHub profile id shown in the panel; empty infers it from repository remotes. |
 | `levels` | `"default"` | Four ascending lower bounds, e.g. `"1,3,6,10"`. |
 | `refreshIntervalSec` | `300` | Fallback poll; commits already refresh within seconds. |
 

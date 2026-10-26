@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lizindev.commit-tracker",
   "name": "Commit Tracker",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "author": "LizinDev",
   "description": "GitHub-style daily commit activity in the bar, with a history panel, streaks and links to your commits",
   "kinds": ["bar-widget"],
@@ -28,7 +28,8 @@
       "color": "accent",
       "highlightToday": true,
       "showUnpushed": true,
-      "graphWeeks": 26
+      "graphWeeks": 26,
+      "githubId": ""
     },
     "schema": [
       { "key": "days", "type": "integer", "label": "Days shown", "min": 1, "max": 31, "step": 1, "defaultValue": 5 },
@@ -43,7 +44,8 @@
       { "key": "color", "type": "string", "label": "Theme color", "defaultValue": "accent", "description": "With theme colors: a theme role (accent, foreground, urgent, muted) or a hex color." },
       { "key": "highlightToday", "type": "boolean", "label": "Outline today", "defaultValue": true },
       { "key": "showUnpushed", "type": "boolean", "label": "Dot for unpushed commits", "defaultValue": true },
-      { "key": "graphWeeks", "type": "integer", "label": "History graph weeks", "min": 4, "max": 53, "step": 1, "defaultValue": 26 }
+      { "key": "graphWeeks", "type": "integer", "label": "History graph weeks", "min": 4, "max": 53, "step": 1, "defaultValue": 26 },
+      { "key": "githubId", "type": "string", "label": "GitHub ID", "defaultValue": "", "description": "Profile id shown in the history panel. Empty infers the predominant owner from GitHub repository remotes." }
     ]
   }
 }
