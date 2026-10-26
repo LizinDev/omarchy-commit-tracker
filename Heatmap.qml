@@ -23,10 +23,28 @@ Item {
   // First weekday of a column, as Date.getDay() counts: 0 is Sunday.
   property int weekStart: 0
 
-  property int cellSize: Style.space(11)
   property int gap: Style.space(3)
+  // The weekday column. The panel matches it to the commit timeline's gutter,
+  // so the grid and the list share one left edge.
+  property int labelGutter: Style.space(30)
+  // Given a width, cells grow to fill it, so the graph spans the panel instead
+  // of floating in it; without one they keep the bar strip's size.
+  property real fitWidth: 0
+  property int minCellSize: Style.space(7)
+  property int maxCellSize: Style.space(15)
+  property int cellSize: fitWidth > 0
+    ? Math.max(minCellSize, Math.min(maxCellSize, Math.floor((fitWidth - labelGutter + gap) / weeks) - gap))
+    : Style.space(11)
   readonly property int pitch: cellSize + gap
-  readonly property int labelGutter: Style.space(30)
+  // Columns step by an exact share of the width so the last one ends on the
+  // right edge, level with the rows under the graph; rounding each column's
+  // x keeps cells crisp, at the cost of gaps that differ by a pixel.
+  readonly property real columnPitch: fitWidth > 0 ? (fitWidth - labelGutter + gap) / weeks : pitch
+  function columnX(col) { return labelGutter + Math.round(col * columnPitch) }
+  // The narrowest the graph can draw, for a panel that sizes itself to fit it.
+  readonly property int minimumWidth: labelGutter + weeks * (minCellSize + gap) - gap
+  // A day another part of the panel points at (the commit under the pointer).
+  property string pointedDate: ""
   readonly property int monthRowHeight: Style.font.caption + Style.space(6)
 
   property int hoveredCell: -1
@@ -49,7 +67,7 @@ Item {
   }
 
   function cellAt(x, y) {
-    var col = Math.floor(x / pitch)
+    var col = Math.floor(x / columnPitch)
     var row = Math.floor(y / pitch)
     if (col < 0 || col >= weeks || row < 0 || row > 6) return -1
     return col * 7 + row
@@ -80,7 +98,7 @@ Item {
     return out
   }
 
-  implicitWidth: labelGutter + weeks * pitch - gap
+  implicitWidth: fitWidth > 0 ? fitWidth : labelGutter + weeks * pitch - gap
   implicitHeight: monthRowHeight + 7 * pitch - gap
 
   Repeater {
@@ -88,7 +106,7 @@ Item {
 
     Text {
       required property var modelData
-      x: root.labelGutter + modelData.col * root.pitch
+      x: root.columnX(modelData.col)
       y: 0
       text: modelData.text
       textFormat: Text.PlainText
@@ -135,7 +153,7 @@ Item {
       readonly property var day: root.dayAtCell(index)
 
       visible: day !== null
-      x: root.labelGutter + Math.floor(index / 7) * root.pitch
+      x: root.columnX(Math.floor(index / 7))
       y: root.monthRowHeight + (index % 7) * root.pitch
       width: root.cellSize
       height: root.cellSize
@@ -144,26 +162,34 @@ Item {
     }
   }
 
+  readonly property int pointedCell: {
+    if (pointedDate === "") return -1
+    for (var i = 0; i < days.length; i++) if (days[i].date === pointedDate) return i + leading
+    return -1
+  }
+
   component CellOutline: Rectangle {
     property int cell: -1
+    property color tone: Util.alpha(root.ink, 0.85)
     visible: root.dayAtCell(cell) !== null
-    x: root.labelGutter + Math.floor(cell / 7) * root.pitch
+    x: root.columnX(Math.floor(cell / 7))
     y: root.monthRowHeight + (cell % 7) * root.pitch
     width: root.cellSize
     height: root.cellSize
     radius: root.cellRadius
     color: "transparent"
     border.width: 1
-    border.color: Util.alpha(root.ink, 0.85)
+    border.color: tone
   }
 
   CellOutline { cell: root.selectedCell }
+  CellOutline { cell: root.pointedCell; tone: Color.accent }
   CellOutline { cell: root.hoveredCell }
 
   MouseArea {
     x: root.labelGutter
     y: root.monthRowHeight
-    width: root.weeks * root.pitch
+    width: root.weeks * root.columnPitch
     height: 7 * root.pitch
     hoverEnabled: true
     cursorShape: root.hoveredDay ? Qt.PointingHandCursor : Qt.ArrowCursor

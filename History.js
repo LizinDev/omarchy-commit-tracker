@@ -51,6 +51,38 @@ function periodLabel(weeks) {
   return weeks + " weeks"
 }
 
+// Prefer an explicit profile id. Otherwise use the GitHub owner responsible
+// for the most commits in the repositories represented by this history.
+function githubHandle(configured, repos) {
+  var explicit = String(configured || "").trim().replace(/^@+/, "")
+  if (explicit) return explicit
+  if (!isList(repos)) return ""
+
+  var weights = {}
+  var labels = {}
+  var order = []
+  for (var i = 0; i < repos.length; i++) {
+    var repo = repos[i]
+    var match = String(repo && repo.url || "").match(/^https:\/\/github\.com\/([^\/]+)(?:\/|$)/i)
+    if (!match) continue
+    var label = match[1]
+    var key = label.toLowerCase()
+    if (weights[key] === undefined) {
+      weights[key] = 0
+      labels[key] = label
+      order.push(key)
+    }
+    weights[key] += Math.max(1, Number(repo.commits) || 0)
+  }
+
+  var best = ""
+  for (var j = 0; j < order.length; j++) {
+    var candidate = order[j]
+    if (!best || weights[candidate] > weights[best]) best = candidate
+  }
+  return best ? labels[best] : ""
+}
+
 // Flat rows for the commit list: a heading row per day, newest first, then
 // that day's commits. Optionally narrowed to one repository and/or one day.
 function groupedRows(commits, repo, date) {

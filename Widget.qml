@@ -40,6 +40,21 @@ BarWidget {
   readonly property bool highlightToday: boolSetting("highlightToday", true)
   readonly property bool showUnpushed: boolSetting("showUnpushed", true)
   readonly property int graphWeeks: intSetting("graphWeeks", 26, 4, 53)
+  readonly property string githubId: String(setting("githubId", "")).trim().replace(/^@+/, "")
+  readonly property string barSection: {
+    var layout = bar && bar.layoutConfig ? bar.layoutConfig : null
+    var sections = ["left", "center", "right"]
+    for (var s = 0; layout && s < sections.length; s++) {
+      var entries = layout[sections[s]]
+      if (!isList(entries)) continue
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i]
+        var id = entry && typeof entry === "object" ? entry.id : entry
+        if (String(id || "") === moduleName) return sections[s]
+      }
+    }
+    return "left"
+  }
 
   function intSetting(name, fallback, min, max) {
     var n = Math.round(Number(setting(name, fallback)))

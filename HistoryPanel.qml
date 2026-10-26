@@ -69,9 +69,18 @@ Item {
   readonly property int totalCommits: dayCounts.reduce(function(sum, n) { return sum + n }, 0)
   readonly property int activeDays: dayCounts.filter(function(n) { return n > 0 }).length
   readonly property var rows: History.groupedRows(commits, repo, selectedDate)
+  readonly property string githubId: History.githubHandle(host ? host.githubId : "", repos)
 
   readonly property color ink: Color.popups.text
   readonly property color muted: Util.alpha(ink, 0.6)
+  readonly property color accent: Color.accent
+  readonly property bool railOnRight: host && host.barSection === "right"
+  readonly property int railWidth: Style.space(34)
+  readonly property int railGap: Style.space(8)
+  readonly property int railDividerGap: Style.space(4)
+  // One left column for the graph's weekday labels, the scope row and the
+  // commit timeline, so the three read as one surface.
+  readonly property int gutter: Style.space(28)
 
   function count(n, word) {
     return n + " " + word + (n === 1 ? "" : "s")
@@ -93,32 +102,29 @@ Item {
     }
   }
 
-  readonly property string summary: {
-    if (!history) return root.host && root.host.historyError !== "" ? root.host.historyError : "Counting commits…"
-    var text = count(totalCommits, "commit") + " in the last " + History.periodLabel(root.host ? root.host.graphWeeks : 26)
-    if (repo !== "") text += " in " + repo
-    if (root.host && root.host.historyLoading) text += " · refreshing"
-    return text
-  }
-
-  // One line under the graph that answers whatever the pointer is on.
-  readonly property string status: {
+  // The header's second line answers whatever the pointer is on (a day on
+  // the graph, a commit in the list) and otherwise sums up the period.
+  readonly property bool readoutLive: !!heatmap.hoveredDay || !!hoveredCommit
+  readonly property string readout: {
     var day = heatmap.hoveredDay
     if (day) {
       var n = History.dayCommits(day, repo)
-      var line = Qt.formatDate(heatmap.dateOf(day.date), "ddd d MMM yyyy") + " · " + (n === 0 ? "no commits" : count(n, "commit"))
-      if (n > 0 && repo === "") line += "  +" + day.added + " −" + day.deleted
+      var line = Qt.formatDate(heatmap.dateOf(day.date), "ddd d MMM") + " · " + (n === 0 ? "no commits" : count(n, "commit"))
+      if (n > 0 && repo === "") line += " · +" + day.added + " \u2212" + day.deleted
       return line
     }
     var commit = hoveredCommit
     if (commit) {
       if (hoverRepo !== "" && hoverRepo !== repo) return "Show only " + hoverRepo
       if (commit.url) return commit.short + " · opens on " + forgeHost(commit.url)
-      return commit.short + (commit.pushed ? " · its remote has no web page" : " · not pushed") + ", click to copy the hash"
+      return commit.short + (commit.pushed ? " · its remote has no web page" : " · not pushed") + " · click to copy"
     }
     if (notice !== "") return notice
+    if (!history) return root.host && root.host.historyError !== "" ? root.host.historyError : "Counting commits\u2026"
     if (root.host && root.host.historyError !== "") return "Last refresh failed: " + root.host.historyError
-    return "Click a day to filter"
+    var text = count(totalCommits, "commit") + " in the last " + History.periodLabel(root.host ? root.host.graphWeeks : 26)
+    if (repo !== "") text += " in " + repo
+    return text
   }
 
   KeyboardPanel {
@@ -128,7 +134,7 @@ Item {
     bar: root.bar
     open: root.open
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Math.max(Style.space(460), heatmap.implicitWidth)
+    contentWidth: panel.fittedContentWidth(Math.max(Style.space(460), heatmap.minimumWidth)
       + panel.padding * 2 + Border.left(panel.borderSpec) + Border.right(panel.borderSpec))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
@@ -157,40 +163,167 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         interactive: contentHeight > height || contentWidth > width
 
-        Column {
+        Item {
           id: body
-          // Never narrower than the graph: a capped popup scrolls sideways
-          // rather than dropping the newest weeks off the edge.
-          width: Math.max(scroller.width, heatmap.implicitWidth)
-          spacing: Style.space(10)
+          // The rail and graph retain their real size together. A capped popup
+          // scrolls sideways instead of dropping the newest weeks.
+          width: Math.max(scroller.width, root.railWidth + root.railDividerGap
+            + Style.spacing.hairline + root.railGap + heatmap.minimumWidth)
+          implicitHeight: mainColumn.implicitHeight
 
-          // ---- Title, summary, actions.
+          // A persistent activity spine: the three numbers that used to take
+          // a full row stay visible without stealing width from the logbook.
           Item {
-            width: parent.width
-            implicitHeight: Math.max(titleColumn.implicitHeight, actions.implicitHeight)
+            id: rail
+            anchors.left: root.railOnRight ? undefined : parent.left
+            anchors.right: root.railOnRight ? parent.right : undefined
+            anchors.top: parent.top
+            width: root.railWidth
+            height: mainColumn.implicitHeight
 
-            Column {
-              id: titleColumn
+            Rectangle {
               anchors.left: parent.left
-              anchors.right: actions.left
-              anchors.rightMargin: Style.spacing.md
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.spacing.xxs
+              anchors.top: parent.top
+              width: Style.space(2)
+              height: Style.space(28)
+              color: root.accent
+            }
+
+            Rectangle {
+              id: railMark
+              anchors.top: parent.top
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: Style.space(28)
+              height: width
+              radius: Style.cornerRadius
+              color: Util.alpha(root.accent, 0.12)
 
               Text {
-                text: "Commit activity"
+                anchors.centerIn: parent
+                text: "\uf1da"
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.heading
+              }
+            }
+
+            Column {
+              anchors.top: railMark.bottom
+              anchors.topMargin: Style.space(12)
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: parent.width
+              spacing: Style.space(12)
+
+              Repeater {
+                model: [
+                  { value: root.streak.current, label: "NOW", accent: true },
+                  { value: root.streak.longest, label: "BEST", accent: false },
+                  { value: root.activeDays, label: "DAYS", accent: false }
+                ]
+
+                Column {
+                  required property var modelData
+                  width: root.railWidth
+                  spacing: 0
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: String(modelData.value)
+                    textFormat: Text.PlainText
+                    color: modelData.accent ? root.accent : root.ink
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.heading
+                    font.bold: true
+                  }
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: modelData.label
+                    textFormat: Text.PlainText
+                    color: root.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.letterSpacing: Style.spaceReal(0.5)
+                  }
+                }
+              }
+            }
+          }
+
+          Rectangle {
+            id: railDivider
+            anchors.left: root.railOnRight ? undefined : rail.right
+            anchors.right: root.railOnRight ? rail.left : undefined
+            anchors.leftMargin: root.railOnRight ? 0 : root.railDividerGap
+            anchors.rightMargin: root.railOnRight ? root.railDividerGap : 0
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: Style.spacing.hairline
+            color: Util.alpha(root.ink, 0.1)
+          }
+
+          Column {
+            id: mainColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.leftMargin: root.railOnRight ? 0 : root.railWidth + root.railDividerGap
+              + Style.spacing.hairline + root.railGap
+            anchors.rightMargin: root.railOnRight ? root.railWidth + root.railDividerGap
+              + Style.spacing.hairline + root.railGap : 0
+            anchors.top: parent.top
+            spacing: Style.space(8)
+
+          // ---- Who and what: the GitHub id, a live readout, the actions.
+          Item {
+            id: header
+            width: parent.width
+            implicitHeight: Math.max(idMark.height, idText.implicitHeight)
+
+            Rectangle {
+              id: idMark
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(34)
+              height: width
+              radius: Style.cornerRadius
+              color: Util.alpha(root.accent, 0.12)
+
+              Text {
+                anchors.centerIn: parent
+                text: root.githubId ? "\uf09b" : "\ue702"
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.heading
+              }
+            }
+
+            Column {
+              id: idText
+              anchors.left: idMark.right
+              anchors.leftMargin: Style.space(12)
+              anchors.right: actions.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(2)
+
+              Text {
+                width: parent.width
+                text: root.githubId ? "@" + root.githubId : "Commit activity"
                 textFormat: Text.PlainText
                 color: root.ink
+                elide: Text.ElideRight
                 font.family: Style.font.family
-                font.pixelSize: Style.font.title
+                font.pixelSize: Style.font.heading
                 font.bold: true
               }
 
               Text {
                 width: parent.width
-                text: root.summary
+                text: root.readout
                 textFormat: Text.PlainText
-                color: root.muted
+                color: root.readoutLive ? root.ink : root.muted
                 elide: Text.ElideRight
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -203,73 +336,62 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.spacing.xs
 
-              PanelActionButton {
-                iconText: "\uf021"
-                tooltipText: "Refresh (r)"
-                foreground: root.ink
+              TintButton {
+                glyph: "\uf021"
+                tooltip: "Refresh (r)"
+                spinning: !!root.host && root.host.historyLoading
                 onClicked: if (root.host) root.host.refreshHistory()
               }
 
-              PanelActionButton {
-                iconText: "\uf013"
-                tooltipText: "Settings (s)"
-                foreground: root.ink
+              TintButton {
+                glyph: "\uf013"
+                tooltip: "Settings (s)"
                 onClicked: if (root.host) root.host.openSettings()
               }
             }
           }
 
-          // ---- Streaks and totals on the left, the repository picker on the
-          //      right: one searchable list instead of a chip per repository,
-          //      so a hundred repositories cost no more room than five.
-          Item {
+          // ---- The graph spans the column; its weekday labels sit in the
+          //      same gutter as the commit timeline below.
+          Heatmap {
+            id: heatmap
             width: parent.width
-            implicitHeight: Math.max(stats.implicitHeight, repoPicker.implicitHeight)
+            fitWidth: width
+            labelGutter: root.gutter
+            days: root.days
+            metric: root.host ? root.host.metric : "commits"
+            repo: root.repo
+            thresholds: root.host ? root.host.thresholds : [1, 2, 4, 8]
+            appearance: root.host ? root.host.appearance : "theme"
+            surface: Color.popups.background
+            ink: root.ink
+            base: root.host ? root.host.baseColor : Color.accent
+            selectedDate: root.selectedDate
+            pointedDate: root.hoveredCommit ? String(root.hoveredCommit.date) : ""
+            weekStart: root.host ? root.host.weekStart : 0
+            onDayClicked: function(date) { root.selectedDate = root.selectedDate === date ? "" : date }
+          }
 
-            Row {
-              id: stats
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(20)
+          // ---- Scope: which repository and which day the list shows, as
+          //      plain-text controls, with the color key at the far end.
+          Item {
+            id: filterRow
+            width: parent.width
+            implicitHeight: Math.max(scopeRow.implicitHeight, legend.implicitHeight) + Style.space(4)
 
-              Repeater {
-                model: [
-                  { value: root.streak.current, label: "current streak", days: true },
-                  { value: root.streak.longest, label: "longest streak", days: true },
-                  { value: root.activeDays, label: "active days", days: false }
-                ]
-
-                Column {
-                  required property var modelData
-                  spacing: 0
-
-                  Text {
-                    text: modelData.days ? root.count(modelData.value, "day") : String(modelData.value)
-                    textFormat: Text.PlainText
-                    color: root.ink
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.heading
-                    font.bold: true
-                  }
-
-                  Text {
-                    text: modelData.label
-                    textFormat: Text.PlainText
-                    color: root.muted
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-              }
-            }
-
+            // The native searchable picker does the choosing; only its boxed
+            // trigger is hidden, behind the text link that opens it.
             SearchableDropdown {
               id: repoPicker
-              anchors.right: parent.right
+              anchors.left: parent.left
+              anchors.leftMargin: root.gutter
               anchors.verticalCenter: parent.verticalCenter
-              width: Math.max(Style.space(130), Math.min(Style.space(200), parent.width - stats.implicitWidth - Style.spacing.lg))
+              width: Style.space(220)
+              rowHeight: filterRow.height
+              opacity: 0
               visible: root.repos.length > 1
               showLabel: false
+              value: root.repo
               foreground: root.ink
               placeholderText: "Search repositories"
               emptyText: "No repository matches"
@@ -279,39 +401,36 @@ Item {
                 }))
               onChanged: function(value) { root.repo = value }
             }
-          }
 
-          Heatmap {
-            id: heatmap
-            days: root.days
-            metric: root.host ? root.host.metric : "commits"
-            repo: root.repo
-            thresholds: root.host ? root.host.thresholds : [1, 2, 4, 8]
-            appearance: root.host ? root.host.appearance : "theme"
-            ink: root.ink
-            base: root.host ? root.host.baseColor : Color.accent
-            selectedDate: root.selectedDate
-            weekStart: root.host ? root.host.weekStart : 0
-            onDayClicked: function(date) { root.selectedDate = root.selectedDate === date ? "" : date }
-          }
-
-          // ---- What the pointer is on, and the color key.
-          Item {
-            width: parent.width
-            implicitHeight: Math.max(statusLine.implicitHeight, legend.implicitHeight)
-
-            Text {
-              id: statusLine
+            Row {
+              id: scopeRow
               anchors.left: parent.left
-              anchors.right: legend.left
-              anchors.rightMargin: Style.spacing.md
+              anchors.leftMargin: root.gutter
               anchors.verticalCenter: parent.verticalCenter
-              text: root.status
-              textFormat: Text.PlainText
-              color: root.muted
-              elide: Text.ElideRight
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
+              spacing: Style.space(12)
+
+              FilterLink {
+                visible: root.repos.length > 1
+                text: "\uf126  " + (root.repo !== "" ? root.repo : "All repositories") + "  \uf107"
+                active: root.repo !== ""
+                tooltip: "Filter by repository"
+                onClicked: repoPicker.toggle()
+              }
+
+              FilterLink {
+                visible: root.repo !== ""
+                text: "\uf00d"
+                tooltip: "Show all repositories"
+                onClicked: root.repo = ""
+              }
+
+              FilterLink {
+                visible: root.selectedDate !== ""
+                text: "\uf073  " + (root.host ? root.host.dayLabel(root.selectedDate) : root.selectedDate) + "  \uf00d"
+                active: true
+                tooltip: "Show every day"
+                onClicked: root.selectedDate = ""
+              }
             }
 
             Row {
@@ -322,6 +441,7 @@ Item {
 
               Text {
                 anchors.verticalCenter: parent.verticalCenter
+                rightPadding: Style.space(2)
                 text: "Less"
                 textFormat: Text.PlainText
                 color: root.muted
@@ -335,15 +455,16 @@ Item {
                 Rectangle {
                   required property int index
                   anchors.verticalCenter: parent.verticalCenter
-                  width: heatmap.cellSize
-                  height: heatmap.cellSize
-                  radius: Math.min(Style.cornerRadius, Math.floor(heatmap.cellSize / 4))
+                  width: Style.space(9)
+                  height: width
+                  radius: heatmap.cellRadius
                   color: Palette.levelColor(index, heatmap.appearance, heatmap.surface, heatmap.ink, heatmap.base)
                 }
               }
 
               Text {
                 anchors.verticalCenter: parent.verticalCenter
+                leftPadding: Style.space(2)
                 text: "More"
                 textFormat: Text.PlainText
                 color: root.muted
@@ -353,45 +474,17 @@ Item {
             }
           }
 
-          PanelSeparator { foreground: root.ink }
-
-          // ---- Commits.
-          Item {
-            width: parent.width
-            implicitHeight: commitsHeader.implicitHeight
-
-            PanelSectionHeader {
-              id: commitsHeader
-              foreground: root.ink
-              text: root.selectedDate !== "" && root.host ? root.host.dayLabel(root.selectedDate) : "Commits"
-            }
-
-            Text {
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              visible: root.repo !== "" || root.selectedDate !== ""
-              text: "Clear filter \uf00d"
-              textFormat: Text.PlainText
-              color: clearMouse.containsMouse ? root.ink : root.muted
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-
-              MouseArea {
-                id: clearMouse
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  root.repo = ""
-                  root.selectedDate = ""
-                }
-              }
+          Connections {
+            target: root
+            function onRepoChanged() {
+              if (repoPicker.value !== root.repo) repoPicker.value = root.repo
             }
           }
 
           Text {
             visible: root.rows.length === 0
             width: parent.width
+            leftPadding: root.gutter
             text: !root.history
               ? (root.host && root.host.historyError !== "" ? "Could not load the history." : "Counting commits…")
               : (root.listCapped && (root.selectedDate === "" || root.selectedDate < root.oldestListed)
@@ -407,7 +500,7 @@ Item {
             id: list
             visible: root.rows.length > 0
             width: parent.width
-            height: Math.min(contentHeight, Style.space(280))
+            height: Math.min(contentHeight, Style.space(320))
             clip: true
             model: root.rows
             boundsBehavior: Flickable.StopAtBounds
@@ -418,10 +511,12 @@ Item {
               readonly property bool isDay: modelData.kind === "day"
               readonly property var commit: isDay ? null : modelData.commit
 
-              // The repository name doubles as a filter: click it to show
-              // only that repository; the rest of the row opens the commit.
-              readonly property real repoStart: Style.spacing.sm + Style.space(6) + Style.spacing.sm
-              readonly property real repoEnd: repoStart + Style.space(104)
+              // A thin time spine turns the flat rows into a logbook. The
+              // repository still doubles as a filter; the rest opens/copies.
+              readonly property real timelineCenter: Math.round(root.gutter * 0.4)
+              readonly property real contentStart: root.gutter
+              readonly property real repoStart: contentStart + Style.spacing.sm
+              readonly property real repoEnd: repoStart + Style.space(92)
               readonly property bool repoHot: rowMouse.containsMouse && rowMouse.mouseX >= repoStart && rowMouse.mouseX <= repoEnd
 
               function syncHover() {
@@ -435,17 +530,36 @@ Item {
               }
 
               width: list.width
-              height: isDay ? dayText.implicitHeight + Style.spacing.sm : Style.space(26)
+              height: isDay ? Style.space(20) : Style.space(22)
+
+              Rectangle {
+                x: rowItem.timelineCenter
+                y: rowItem.isDay ? parent.height / 2 : 0
+                width: Style.spacing.hairline
+                height: rowItem.isDay ? parent.height / 2 : parent.height
+                color: Util.alpha(root.ink, 0.14)
+              }
+
+              Rectangle {
+                id: timelineDot
+                anchors.verticalCenter: parent.verticalCenter
+                x: rowItem.timelineCenter - width / 2 + Style.spacing.hairline / 2
+                width: rowItem.isDay ? Style.space(7) : Style.space(5)
+                height: width
+                radius: width / 2
+                color: rowItem.isDay ? root.accent
+                  : (rowItem.commit && !rowItem.commit.pushed ? Color.bar.active : Util.alpha(root.ink, 0.35))
+              }
 
               Text {
                 id: dayText
                 visible: rowItem.isDay
                 anchors.left: parent.left
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: Style.spacing.xxs
+                anchors.leftMargin: rowItem.contentStart
+                anchors.verticalCenter: parent.verticalCenter
                 text: rowItem.isDay && root.host ? root.host.dayLabel(rowItem.modelData.date) : ""
                 textFormat: Text.PlainText
-                color: root.muted
+                color: root.ink
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -453,7 +567,11 @@ Item {
 
               CursorSurface {
                 visible: !rowItem.isDay
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.leftMargin: rowItem.contentStart
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
                 hasCursor: rowMouse.containsMouse
                 foreground: root.ink
 
@@ -462,23 +580,11 @@ Item {
                   anchors.leftMargin: Style.spacing.sm
                   anchors.rightMargin: Style.spacing.sm
 
-                  // Only-local commits carry the same dot as the bar strip.
-                  Rectangle {
-                    id: localDot
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(6)
-                    height: width
-                    radius: width / 2
-                    color: rowItem.commit && !rowItem.commit.pushed ? Color.bar.active : "transparent"
-                  }
-
                   Text {
                     id: repoText
-                    anchors.left: localDot.right
-                    anchors.leftMargin: Style.spacing.sm
+                    anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(104)
+                    width: Style.space(92)
                     text: rowItem.commit ? rowItem.commit.repo : ""
                     textFormat: Text.PlainText
                     color: rowItem.repoHot ? root.ink : root.muted
@@ -513,7 +619,7 @@ Item {
                     color: root.ink
                     elide: Text.ElideRight
                     font.family: Style.font.family
-                    font.pixelSize: Style.font.body
+                    font.pixelSize: Style.font.bodySmall
                   }
                 }
               }
@@ -564,8 +670,87 @@ Item {
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
+          }
         }
       }
+    }
+  }
+
+  // A tinted square, as in Omarchy's newer panels: accent at 12%, 30% under
+  // the pointer. Spins its glyph while `spinning`.
+  component TintButton: Rectangle {
+    id: tint
+    signal clicked()
+    property string glyph: ""
+    property string tooltip: ""
+    property bool spinning: false
+
+    implicitWidth: Style.space(30)
+    implicitHeight: implicitWidth
+    radius: Style.cornerRadius
+    color: Util.alpha(root.accent, tintMouse.containsMouse ? 0.3 : 0.12)
+
+    Behavior on color { ColorAnimation { duration: 140 } }
+
+    Text {
+      id: tintGlyph
+      anchors.centerIn: parent
+      text: tint.glyph
+      textFormat: Text.PlainText
+      color: root.accent
+      font.family: Style.font.family
+      font.pixelSize: Style.font.title
+
+      RotationAnimation on rotation {
+        running: tint.spinning
+        from: 0
+        to: 360
+        duration: 900
+        loops: Animation.Infinite
+        onRunningChanged: if (!running) tintGlyph.rotation = 0
+      }
+    }
+
+    MouseArea {
+      id: tintMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tint.clicked()
+    }
+
+    PanelToolTip {
+      visible: tintMouse.containsMouse
+      text: tint.tooltip
+    }
+  }
+
+  // A plain-text control: muted until hovered, accent while it narrows the
+  // view. Stands in for boxed buttons, which would pile up in one row.
+  component FilterLink: Text {
+    id: link
+    signal clicked()
+    property bool active: false
+    property string tooltip: ""
+
+    textFormat: Text.PlainText
+    color: active ? root.accent : (linkMouse.containsMouse ? root.ink : root.muted)
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    font.bold: active
+
+    MouseArea {
+      id: linkMouse
+      anchors.fill: parent
+      anchors.margins: -Style.space(4)
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: link.clicked()
+    }
+
+    PanelToolTip {
+      visible: linkMouse.containsMouse && link.tooltip !== ""
+      text: link.tooltip
     }
   }
 }
