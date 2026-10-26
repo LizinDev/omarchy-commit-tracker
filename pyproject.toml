@@ -1,0 +1,22 @@
+# Tooling only: the collector is a standalone stdlib script, nothing here is
+# installed.
+
+[project]
+name = "omarchy-commit-tracker"
+version = "1.2.0"
+description = "Collector and tests for the Commit Tracker Omarchy bar plugin"
+requires-python = ">=3.11"
+license = "MIT"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+# The collector has no .py extension; list it so `ruff check` finds it.
+extend-include = ["bin/commit-tracker"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Synthetic fixtures read better as one record per line.
+"tests/*" = ["E501"]

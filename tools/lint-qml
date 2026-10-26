@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Lints the panel's QML against the installed Omarchy shell.
+#
+# qmllint (Qt 6.11-6.12) gives up without a word on typed IPC functions such
+# as `function open(): void`, so the files are linted from a scratch copy with
+# those return types removed, and `qs` is mapped to the shell so imports like
+# `qs.Ui` resolve.
+
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+shell="${OMARCHY_PATH:-/usr/share/omarchy}/shell"
+[[ -d $shell ]] || { echo "lint-qml: no Omarchy shell at $shell" >&2; exit 2; }
+
+scratch="$(mktemp -d)"
+trap 'rm -rf "$scratch"' EXIT
+ln -s "$shell" "$scratch/qs"
+for file in "$root"/*.qml; do
+  sed -E 's/\): (void|string|bool|int) \{/) {/' "$file" >"$scratch/${file##*/}"
+done
+# The panels import the shared helpers by relative path.
+cp "$root"/*.js "$scratch/"
+
+cd "$scratch"
+qmllint -I "$scratch" -I /usr/lib/qt6/qml ./*.qml
