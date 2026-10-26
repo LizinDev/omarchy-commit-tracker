@@ -120,7 +120,7 @@ def parse_levels(spec: str) -> tuple[str, tuple[int, int, int, int] | None]:
     try:
         nums = [int(part.strip()) for part in parts]
     except ValueError:
-        raise ArgError(f"--levels values must be integers, got {spec!r}")
+        raise ArgError(f"--levels values must be integers, got {spec!r}") from None
     if any(n <= 0 for n in nums):
         raise ArgError(f"--levels values must be positive, got {spec!r}")
     if not (nums[0] < nums[1] < nums[2] < nums[3]):
@@ -374,8 +374,7 @@ def run_git(repo_path: str | None, extra_args: list[str], timeout: int = GIT_TIM
     cmd += extra_args
     try:
         proc = subprocess.run(
-            cmd, env=env, timeout=timeout,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, env=env, timeout=timeout, capture_output=True,
         )
     except subprocess.TimeoutExpired:
         return None, "", f"timed out after {timeout}s"
@@ -397,7 +396,7 @@ def detect_since_flag() -> str:
     """
     try:
         proc = subprocess.run(
-            ["git", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=GIT_TIMEOUT
+            ["git", "--version"], capture_output=True, timeout=GIT_TIMEOUT
         )
         text = proc.stdout.decode("utf-8", "replace")
         m = re.search(r"(\d+)\.(\d+)", text)
@@ -582,7 +581,7 @@ def git_dir(repo_path: str) -> str | None:
         if os.path.isdir(git_entry):
             gitdir = git_entry
         elif os.path.isfile(git_entry):
-            with open(git_entry, "r", encoding="utf-8", errors="replace") as f:
+            with open(git_entry, encoding="utf-8", errors="replace") as f:
                 content = f.read().strip()
             if not content.startswith("gitdir:"):
                 return None
@@ -604,7 +603,7 @@ def head_is_detached(repo_path: str) -> bool:
     if gitdir is None:
         return False
     try:
-        with open(os.path.join(gitdir, "HEAD"), "r", encoding="utf-8", errors="replace") as f:
+        with open(os.path.join(gitdir, "HEAD"), encoding="utf-8", errors="replace") as f:
             head = f.read().strip()
     except OSError:
         return False
@@ -790,7 +789,9 @@ def process_repo(
         )
         urc, uout, uerr = run_git(repo_path, unpushed_args)
         if urc != 0:
-            warnings.append(f"{repo_path}: git log --branches --not --remotes failed (exit {urc}): {uerr.strip()[:200]}")
+            warnings.append(
+                f"{repo_path}: git log --branches --not --remotes failed (exit {urc}): {uerr.strip()[:200]}"
+            )
         else:
             for r in parse_log_output(uout):
                 if not author_matches(patterns, r["author_email"], r["author_name"]):
