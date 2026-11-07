@@ -690,7 +690,7 @@ Item {
     radius: Style.cornerRadius
     color: Util.alpha(root.accent, tintMouse.containsMouse ? 0.3 : 0.12)
 
-    Behavior on color { ColorAnimation { duration: 140 } }
+    Behavior on color { ColorAnimation { duration: Style.duration(140) } }
 
     Text {
       id: tintGlyph
@@ -702,10 +702,10 @@ Item {
       font.pixelSize: Style.font.title
 
       RotationAnimation on rotation {
-        running: tint.spinning
+        running: tint.spinning && !Style.reduceMotion
         from: 0
         to: 360
-        duration: 900
+        duration: Style.duration(900)
         loops: Animation.Infinite
         onRunningChanged: if (!running) tintGlyph.rotation = 0
       }

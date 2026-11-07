@@ -17,6 +17,8 @@ non-obvious changes is in [DEVLOG.md](DEVLOG.md).
 
 ### Changed
 - The collector passes ruff (no behavior change; output checked identical).
+- Every animation follows the shell's reduce-motion setting (`Style.duration`);
+  the refresh glyph stays still there.
 
 ## [1.2.0] - 2026-10-25
 

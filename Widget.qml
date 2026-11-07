@@ -639,7 +639,7 @@ BarWidget {
     opacity: !root.loaded ? 0.35 : (root.errorText !== "" ? 0.55 : 1)
 
     Behavior on opacity {
-      NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+      NumberAnimation { duration: Style.duration(200); easing.type: Easing.OutCubic }
     }
 
     Repeater {
@@ -663,7 +663,7 @@ BarWidget {
         border.color: root.todayRingColor
 
         Behavior on color {
-          ColorAnimation { duration: 240; easing.type: Easing.OutCubic }
+          ColorAnimation { duration: Style.duration(240); easing.type: Easing.OutCubic }
         }
 
         onTooltipHoveredChanged: {
@@ -701,8 +701,8 @@ BarWidget {
 
   SequentialAnimation {
     id: pulse
-    NumberAnimation { target: strip; property: "scale"; to: 0.88; duration: 90; easing.type: Easing.OutQuad }
-    NumberAnimation { target: strip; property: "scale"; to: 1; duration: 180; easing.type: Easing.OutBack }
+    NumberAnimation { target: strip; property: "scale"; to: 0.88; duration: Style.duration(90); easing.type: Easing.OutQuad }
+    NumberAnimation { target: strip; property: "scale"; to: 1; duration: Style.duration(180); easing.type: Easing.OutBack }
   }
 
   // Hover for the tooltips plus right/middle clicks. Left is left to the bar
