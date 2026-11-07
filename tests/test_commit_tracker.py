@@ -959,6 +959,28 @@ class CommitTrackerCLITests(unittest.TestCase):
         self.assertIsNone(commit_entry["url"])
         self.assertEqual(data["unpushed"]["commits"], 1)
 
+    def test_18b_ssh_alias_remote_gets_its_repo_link_from_ssh_config(self):
+        # README limitation lifted: an aliased remote resolves through ~/.ssh/config (here the isolated HOME)
+        self.set_global_identity("owner@example.com", "Owner")
+        repo = self.make_repo("repo")
+        self.git(repo, "remote", "add", "origin", "git@github-work:o/r.git")
+        self.commit(repo, {"a.txt": "a\n"}, "c1", adate=iso(2026, 6, 1, 9), aemail="owner@example.com")
+        now = epoch(2026, 6, 1)
+        args = self.default_args(now, days=3, extra=["--history-days", "5", "--commits", "10"])
+
+        proc = self.run_tool(args)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        repo_entry = next(r for r in json.loads(proc.stdout)["history"]["repos"] if r["name"] == "repo")
+        self.assertIsNone(repo_entry["url"], "no SSH config: an alias still gets no link")
+
+        os.makedirs(os.path.join(self.home, ".ssh"))
+        with open(os.path.join(self.home, ".ssh", "config"), "w") as f:
+            f.write("Host github-work\n    HostName github.com\n    IdentityFile ~/.ssh/work\n")
+        proc = self.run_tool(args)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        repo_entry = next(r for r in json.loads(proc.stdout)["history"]["repos"] if r["name"] == "repo")
+        self.assertEqual(repo_entry["url"], "https://github.com/o/r")
+
     # -- 19. pushed/url fields, including the "remote with no web base" case
 
     def test_19_pushed_and_url_fields(self):

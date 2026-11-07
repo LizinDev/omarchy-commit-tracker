@@ -101,6 +101,14 @@ class SshAliasHostTests(unittest.TestCase):
 
 
 class RemoteToWebUrlWithAliasTests(unittest.TestCase):
+    def test_only_ssh_remotes_use_an_alias(self):
+        cfg = "Host work\n    HostName github.com\n"
+        self.assertEqual(ct.remote_to_web_url("git@work:o/r.git", cfg), "https://github.com/o/r")
+        self.assertEqual(ct.remote_to_web_url("ssh://git@work/o/r.git", cfg), "https://github.com/o/r")
+        self.assertIsNone(ct.remote_to_web_url("https://work/o/r.git", cfg))
+        self.assertIsNone(ct.remote_to_web_url("git://work/o/r.git", cfg))
+        self.assertIsNone(ct.remote_to_web_url("http://work/o/r.git", cfg))
+
 
     def test_scp_like_alias_resolved(self):
         self.assertEqual(

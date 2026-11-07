@@ -192,8 +192,10 @@ unusual (odd characters, dot segments, an IP address) gets no link. Errors are r
   after a fetch.
 - A rebased or cherry-picked copy gets a new hash and counts separately while
   the old one is still reachable (for example, before a force-push).
-- A remote that uses an SSH host alias (`git@github-work:me/repo`) gets no
-  commit links: the real host is only in your SSH config.
+- A remote that uses an SSH host alias (`git@github-work:me/repo`) gets its
+  commit links from the alias's `HostName` in `~/.ssh/config`. Only literal
+  `Host` names are matched (no wildcards, no `Match` blocks, `Include` is not
+  followed); an alias that does not resolve still gets no links.
 - Git filters by committer date, so a commit whose committer date is more than
   a day earlier than its author date can be missed. Normal workflows never
   produce that.
@@ -201,7 +203,9 @@ unusual (odd characters, dot segments, an IP address) gets no link. Errors are r
 ## Privacy
 
 Everything runs on your machine, and nothing is sent anywhere: the collector
-only reads your repositories with git and prints JSON for the bar. Commit
+only reads your repositories with git and prints JSON for the bar. To link
+commits of a remote that uses an SSH host alias it reads `~/.ssh/config`, and
+uses only the `HostName` of that alias; nothing from that file is printed. Commit
 links open in your browser when you click them. The strip and the panel show
 repository names and commit subjects, so keep that in mind before sharing a
 screenshot of the panel.

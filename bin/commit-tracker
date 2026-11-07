@@ -349,15 +349,18 @@ def remote_to_web_url(url: str | None, ssh_config: str | None = None) -> str | N
         if parts.scheme.lower() not in _SUPPORTED_SCHEMES:
             return None  # file://, or anything else unsupported
         path = parts.path  # query and fragment never belong in the link
+        ssh_remote = parts.scheme.lower() == "ssh"
     else:
         m = _SCP_LIKE_RE.match(url)
         if not m:
             return None  # local path or unparseable
         host = m.group(1).rsplit("@", 1)[-1].lower()
         path = m.group(2)
+        ssh_remote = True  # scp-like remotes always go through ssh
 
     if not _HOST_RE.match(host):
-        if ssh_config is not None:
+        # only SSH remotes can use an SSH host alias; an https:// or git:// "alias" stays unresolved
+        if ssh_config is not None and ssh_remote:
             host = ssh_alias_host(host, ssh_config) or host
         if not _HOST_RE.match(host):
             return None
@@ -548,6 +551,23 @@ def get_local_repo_config(repo_path: str) -> tuple[str | None, str | None, dict[
             if remote_name:
                 remotes[remote_name] = value
     return email, name, remotes, None
+
+
+_SSH_CONFIG: list[str | None] = []  # read once per run
+
+
+def user_ssh_config() -> str | None:
+    """The text of ~/.ssh/config, or None. Only ssh_alias_host reads it, to turn
+    an alias (`git@github-work:...`) into its HostName; `Include` is not followed."""
+    if not _SSH_CONFIG:
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".ssh", "config"), encoding="utf-8",
+                      errors="replace") as f:
+                text = f.read()
+        except OSError:
+            text = None
+        _SSH_CONFIG.append(text)
+    return _SSH_CONFIG[0]
 
 
 def pick_remote_url(remotes: dict[str, str]) -> str | None:
@@ -808,7 +828,7 @@ def process_repo(
     if cfg_warn:
         warnings.append(cfg_warn)
     has_remote = bool(remotes)
-    web_base = remote_to_web_url(pick_remote_url(remotes)) if has_remote else None
+    web_base = remote_to_web_url(pick_remote_url(remotes), user_ssh_config()) if has_remote else None
 
     if author_patterns_explicit is not None:
         patterns = list(author_patterns_explicit)

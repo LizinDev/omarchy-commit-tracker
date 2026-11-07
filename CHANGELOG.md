@@ -8,6 +8,8 @@ non-obvious changes is in [DEVLOG.md](DEVLOG.md).
 ## [Unreleased]
 
 ### Added
+- Commit links for remotes that use an SSH host alias (`git@github-work:me/repo`):
+  the alias's `HostName` is read from `~/.ssh/config` (literal `Host` names only).
 - `make check`, `make dev` and the rest of a `Makefile` for development.
 - `tools/lint-qml`, which lints the QML against the installed Omarchy shell.
 - CI on GitHub Actions: the tests on Python 3.11 and 3.14, ruff, shellcheck.
