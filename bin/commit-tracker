@@ -237,18 +237,104 @@ _PATH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 _SUPPORTED_SCHEMES = ("http", "https", "ssh", "git")
 
 
-def remote_to_web_url(url: str | None) -> str | None:
+def ssh_alias_host(alias: str, ssh_config: str) -> str | None:
+    """Resolve the HostName that applies to an SSH host alias.
+
+    Given the text of an OpenSSH client config, return the lower-cased
+    ``HostName`` that applies to ``alias``, or None. ``Host`` lines list
+    whitespace-separated patterns; the block applies when one pattern
+    equals ``alias`` exactly (case-insensitive). Patterns containing a
+    ``*``, ``?`` or ``!`` never match (no wildcard support). The first
+    block that sets ``HostName`` wins -- later blocks do not override it.
+    Keywords are case-insensitive and written ``HostName value`` or
+    ``HostName=value``; text after ``#`` and blank lines are ignored. A
+    ``Match`` line ends the current block and is not supported (its
+    settings are ignored). The result is a real host name by the same
+    rule ``remote_to_web_url`` uses (``_HOST_RE``), else None.
+    """
+    alias = alias.strip().lower()
+    alias = alias.strip()
+    if not alias:
+        return None
+
+    host_name = None
+    host_name_set = False
+    current_alias = None
+    for raw_line in ssh_config.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+
+        # "HostName value" and "HostName=value" are both accepted. When the
+        # inline "=value" form is used the whole line is "keyword=value", so
+        # split the (already stripped) line on the first '=' to separate the
+        # keyword from its value; otherwise the keyword is the first token
+        # and the remaining tokens make up the value.
+        value_line = ""
+        if "=" in line:
+            keyword, value_line = line.split("=", 1)
+            tokens = value_line.split()
+            keyword = keyword.strip()
+        else:
+            all_tokens = line.split()
+            keyword = all_tokens[0]
+            tokens = all_tokens[1:]
+            value_line = " ".join(tokens)
+        keyword = keyword.strip().lower()
+
+        if keyword == "match":
+            current_alias = None
+            continue
+
+        if keyword == "host":
+            patterns = tokens
+            matched = False
+            for pattern in patterns:
+                if (
+                    alias == pattern.lower()
+                    and "*" not in pattern
+                    and "?" not in pattern
+                    and "!" not in pattern
+                ):
+                    matched = True
+                    break
+            current_alias = alias if matched else None
+            continue
+
+        if (
+            keyword == "hostname"
+            and current_alias == alias
+            and not host_name_set
+        ):
+            # Only a HostName inside a Host block that matches ``alias`` is
+            # recorded, and only the first one wins. "HostName" alone has
+            # no value, so nothing is recorded.
+            if value_line.strip():
+                host_name = value_line.strip().lower()
+                host_name_set = True
+            continue
+
+    if not host_name_set or not _HOST_RE.match(host_name):
+        return None
+    return host_name
+
+
+def remote_to_web_url(url: str | None, ssh_config: str | None = None) -> str | None:
     """Normalize a git remote URL to an https://host/owner/repo base, or None.
 
     Remote URLs come from repository config, which a cloned repository's
     author controls, and the result is opened in a browser -- so this is
-    strict: the only thing that survives is https://, a real dotted host name,
-    and plain path segments. Credentials (any number of user@ prefixes),
-    ports, query strings and fragments are always dropped; dot segments,
-    encoded or odd characters, IP literals, SSH host aliases, local paths and
+    strict: the only thing that survives is https://, a real dotted host
+    name, and plain path segments. Credentials (any number of user@
+    prefixes), ports, query strings and fragments are always dropped; dot
+    segments, encoded or odd characters, IP literals, local paths and
     file:// all give None. Handles scp-like (git@host:owner/repo), ssh://,
     https:// and git:// forms, strips a trailing .git, keeps nested paths
-    (GitLab subgroups). Never returns or logs the raw input.
+    (GitLab subgroups). When the host of an scp-like remote or an ssh://
+    remote is not itself a real host name, an SSH host alias can be
+    resolved from an OpenSSH client config (ssh_config) before the
+    real, dotted host name is checked. Never returns or logs the raw
+    input.
     """
     if not url:
         return None
@@ -271,7 +357,11 @@ def remote_to_web_url(url: str | None) -> str | None:
         path = m.group(2)
 
     if not _HOST_RE.match(host):
-        return None
+        if ssh_config is not None:
+            host = ssh_alias_host(host, ssh_config) or host
+        if not _HOST_RE.match(host):
+            return None
+
     segments = [seg for seg in path.split("/") if seg]
     if segments and segments[-1].endswith(".git"):
         segments[-1] = segments[-1][: -len(".git")]
