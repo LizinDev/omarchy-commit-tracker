@@ -884,8 +884,10 @@ BarWidget {
   }
 
   // `omarchy-shell commit-tracker refresh` (e.g. from a git hook), plus the
-  // two popups and the metric switch for keybinds.
-  IpcHandler {
+  // two popups and the metric switch for keybinds. ShellIpc rather than a bare
+  // IpcHandler: omarchy-shell then answers over the shell's own socket (~7 ms)
+  // instead of falling back to a qs ipc client (~50 ms).
+  ShellIpc {
     target: "commit-tracker"
 
     function refresh(): void { root.refresh() }
